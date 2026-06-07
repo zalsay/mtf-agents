@@ -13,8 +13,8 @@ description: "当需要作为 MTF A 股 ETF 助手处理 ETF 筛选、热门 ETF
 
 主要参考：
 
-- 当前 API 能力：`docs/mtf/fintrack-api-capabilities.md`
-- Open API 合约：`docs/mtf/fintrack-open-api-contract.md`
+- 当前 API 能力：`../mtf-service/docs/mtf/fintrack-api-capabilities.md`
+- Open API 合约：`../mtf-service/docs/mtf/fintrack-open-api-contract.md`
 - 生产 Open API base URL：`https://go-api.meetlife.com.cn:9001`
 
 1. **明确目标**
@@ -64,16 +64,25 @@ description: "当需要作为 MTF A 股 ETF 助手处理 ETF 筛选、热门 ETF
 https://go-api.meetlife.com.cn:9001
 ```
 
-当外部调用方需要 MTF Open API key 时，使用本 skill 绑定脚本：
+当 OpenClaw、Claude Code、Codex 等智能体需要 MTF Open API key 时，默认不要让智能体处理用户名和密码。用户应先在 FinTrack 前端“设置 -> 账号设置 -> Open API 临时令牌”中点击生成，复制 32 位一次性令牌；该令牌 5 分钟内有效，且只能兑换一次。
+
+智能体拿到临时令牌后，使用本 skill 绑定脚本兑换 Open API key：
 
 ```bash
 # 从 `mtf-service` 仓库根目录执行。
+MTF_API_TEMP_TOKEN="<32-char-temp-token>" \
+skills/mtf-etf-a-share-assistant/scripts/get_open_api_key.sh
+```
+
+脚本会调用 `POST /api/open/v1/auth/api-key/from-token`，把 `MTF_API_BASE_URL` 和 `FINTRACK_OPEN_API_KEY` 写入 `.env.open-api`，并在新 key 创建时把 raw `api_key` 打印一次。`.env.open-api` 已加入 gitignore。非默认环境可设置 `MTF_API_BASE_URL` 或传 `--base-url`；只需要 stdout 时传 `--no-write-env`。如果用户已经存在 active Open API key，服务端只返回 key 元数据，不会再次返回 raw key；此时应让用户提供已有 `FINTRACK_OPEN_API_KEY`，或由用户在 FinTrack 中作废旧 key 后重新生成临时令牌。
+
+只有在用户明确要求并确认可以由当前环境处理 FinTrack 登录凭证时，才使用遗留用户名/密码方式：
+
+```bash
 MTF_API_USERNAME="<username>" \
 MTF_API_PASSWORD="<password>" \
 skills/mtf-etf-a-share-assistant/scripts/get_open_api_key.sh
 ```
-
-脚本会调用 `POST /api/open/v1/auth/api-key`，把 `MTF_API_BASE_URL` 和 `FINTRACK_OPEN_API_KEY` 写入 `.env.open-api`，再把 raw `api_key` 打印一次。`.env.open-api` 已加入 gitignore。非默认环境可设置 `MTF_API_BASE_URL` 或传 `--base-url`；只需要 stdout 时传 `--no-write-env`。
 
 调用文档中的 Open API 时，优先使用 Python 客户端：
 
@@ -89,7 +98,7 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --sto
 
 ```http
 Authorization: Bearer <MTF_open_api_key>
-X-MTF-User: <如果 key 策略允许，可传外部用户别名>
+X-FinTrack-User: <如果 key 策略允许，可传外部用户别名>
 ```
 
 Open API 调用必须解析到具体 MTF 用户，并执行该用户相同的数据访问策略。除非 key scope 明确允许，否则普通 skill 调用不得使用管理员全局访问。

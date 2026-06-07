@@ -8,7 +8,7 @@
 2. 本仓库 `AGENTS.md`。
 3. `.codex/AGENTS.md` 中的全局工程规则。
 4. `skills/mtf-etf-a-share-assistant/SKILL.md` 和其他被触发的 skill。
-5. `docs/mtf/*` 中的 API 与能力文档。
+5. `../mtf-service/docs/mtf/*` 中的 API 与能力文档。
 
 若规则冲突，优先满足更高层级；若涉及投资研究安全边界，采用更保守规则。
 
@@ -27,8 +27,8 @@ MTF agent 是 A 股/ETF 研究和工具执行助手，只提供研究支持与�
 涉及 MTF agent、ETF、Open API、预测、回测、策略、自选股或外部 skill 调用时，优先参考：
 
 - `skills/mtf-etf-a-share-assistant/SKILL.md`：ETF 助手专项工作流、OpenAPI 片段、脚本用法。
-- `docs/mtf/fintrack-api-capabilities.md`：当前 `fintrack-api` 能力梳理。
-- `docs/mtf/fintrack-open-api-contract.md`：Open API 合约与 scopes。
+- `../mtf-service/docs/mtf/fintrack-api-capabilities.md`：当前 `fintrack-api` 能力梳理。
+- `../mtf-service/docs/mtf/fintrack-open-api-contract.md`：Open API 合约与 scopes。
 
 ## Open API 使用规范
 
@@ -42,7 +42,7 @@ https://go-api.meetlife.com.cn:9001/api/open/v1
 
 ```http
 Authorization: Bearer <MTF_open_api_key>
-X-MTF-User: <optional external user alias>
+X-FinTrack-User: <optional external user alias>
 ```
 
 规则：
@@ -57,8 +57,7 @@ X-MTF-User: <optional external user alias>
 获取和调用 Open API 时优先使用 skill 脚本：
 
 ```bash
-MTF_API_USERNAME="<username>" \
-MTF_API_PASSWORD="<password>" \
+MTF_API_TEMP_TOKEN="<32-char-temp-token>" \
 skills/mtf-etf-a-share-assistant/scripts/get_open_api_key.sh
 
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-hot
@@ -66,6 +65,8 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-quotes 510300 1599
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-best --stock-type 2 --include-validation true
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --stock-code 510300 --stock-type 2 --prediction-type mtf-lite --horizon-len 7 --context-len 256 --prefer-cache
 ```
+
+默认由用户在 FinTrack 前端生成 Open API 临时令牌，再交给 OpenClaw、Claude Code、Codex 等智能体兑换 key。用户名/密码换 key 仅作为用户明确授权的 legacy fallback。
 
 ## 标准 ETF 研究工作流
 
