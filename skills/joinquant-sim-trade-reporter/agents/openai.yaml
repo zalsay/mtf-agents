@@ -1,0 +1,4 @@
+interface:
+  display_name: "JoinQuant模拟交易报告"
+  short_description: "记录模拟盘资金、成交、收益并生成HTML曲线报告"
+  default_prompt: "Use $joinquant-sim-trade-reporter to add JoinQuant simulated-trading reporting: initial cash, daily trades, profit, return rate, actual equity, HTML table, and curve chart."

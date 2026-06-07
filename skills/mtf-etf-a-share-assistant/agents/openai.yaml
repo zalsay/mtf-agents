@@ -1,0 +1,4 @@
+interface:
+  display_name: "MTF ETF A股助手"
+  short_description: "ETF选择、预测、策略和开放接口"
+  default_prompt: "Use $mtf-etf-a-share-assistant to select A股 ETFs, run MTF prediction, and produce a risk-aware strategy."
