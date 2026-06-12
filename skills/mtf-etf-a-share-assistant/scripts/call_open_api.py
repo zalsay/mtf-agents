@@ -43,7 +43,7 @@ def clean_params(params):
     return {key: value for key, value in params.items() if value is not None}
 
 
-def request_json(base_url, api_key, method, path, params=None, payload=None):
+def request_json(base_url, api_key, method, path, params=None, payload=None, extra_headers=None):
     base = base_url.rstrip("/")
     url = base + path
     params = clean_params(params or {})
@@ -51,6 +51,7 @@ def request_json(base_url, api_key, method, path, params=None, payload=None):
         url += "?" + urlencode(params)
     body = None
     headers = {"Authorization": f"Bearer {api_key}"}
+    headers.update(clean_params(extra_headers or {}))
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -75,6 +76,8 @@ def build_parser():
     parser.add_argument("--base-url")
     parser.add_argument("--api-key")
     parser.add_argument("--env-file", default=os.environ.get("MTF_API_ENV_FILE", DEFAULT_ENV_FILE))
+    parser.add_argument("--fintrack-user", help="Optional X-FinTrack-User external user alias")
+    parser.add_argument("--request-id", help="Optional X-Request-Id for caller-side tracing")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("etf-hot")
@@ -92,8 +95,8 @@ def build_parser():
     by_config = sub.add_parser("mtf-best-by-config")
     by_config.add_argument("--symbol", required=True)
     by_config.add_argument("--stock-type", type=int, default=2)
-    by_config.add_argument("--horizon-len", type=int, required=True)
-    by_config.add_argument("--context-len", type=int, required=True)
+    by_config.add_argument("--horizon-len", type=int)
+    by_config.add_argument("--context-len", type=int)
 
     future = sub.add_parser("mtf-future")
     future.add_argument("--unique-key", required=True)
@@ -113,6 +116,8 @@ def build_parser():
     job.add_argument("--job-id", required=True)
 
     sub.add_parser("strategy-list")
+    strategy_save = sub.add_parser("strategy-save")
+    strategy_save.add_argument("--json", required=True, help="JSON body string, or @path/to/body.json")
 
     sub.add_parser("watchlist")
     watch_add = sub.add_parser("watchlist-add")
@@ -123,17 +128,6 @@ def build_parser():
     bind.add_argument("--symbol", required=True)
     bind.add_argument("--stock-type", type=int, default=2)
     bind.add_argument("--strategy-unique-key", required=True)
-
-    agent = sub.add_parser("agent-message")
-    agent.add_argument("--message", required=True)
-    trends = sub.add_parser("agent-history-trends")
-    for name in ("symbol", "unique-key", "prediction-type"):
-        trends.add_argument(f"--{name}")
-    for name in ("horizon-len", "limit", "chunk-limit", "point-limit"):
-        trends.add_argument(f"--{name}", type=int)
-    uzi = sub.add_parser("agent-uzi-reports")
-    uzi.add_argument("--ticker")
-    uzi.add_argument("--limit", type=int)
 
     raw = sub.add_parser("raw")
     raw.add_argument("--method", choices=["GET", "POST"], required=True)
@@ -193,6 +187,8 @@ def command_to_request(args):
         return "GET", f"/api/open/v1/mtf/jobs/{args.job_id}", None, None
     if args.command == "strategy-list":
         return "GET", "/api/open/v1/strategy/list", None, None
+    if args.command == "strategy-save":
+        return "POST", "/api/open/v1/strategy/params", None, parse_json_arg(args.json)
     if args.command == "watchlist":
         return "GET", "/api/open/v1/watchlist", None, None
     if args.command == "watchlist-add":
@@ -207,23 +203,6 @@ def command_to_request(args):
             "stock_type": args.stock_type,
             "strategy_unique_key": args.strategy_unique_key,
         }
-    if args.command == "agent-message":
-        return "POST", "/api/open/v1/agent/messages", None, {"message": args.message}
-    if args.command == "agent-history-trends":
-        return "GET", "/api/open/v1/agent/skills/history-trends", {
-            "symbol": args.symbol,
-            "unique_key": args.unique_key,
-            "prediction_type": args.prediction_type,
-            "horizon_len": args.horizon_len,
-            "limit": args.limit,
-            "chunk_limit": args.chunk_limit,
-            "point_limit": args.point_limit,
-        }, None
-    if args.command == "agent-uzi-reports":
-        return "GET", "/api/open/v1/agent/skills/uzi-reports", {
-            "ticker": args.ticker,
-            "limit": args.limit,
-        }, None
     if args.command == "raw":
         path = args.path if args.path.startswith("/") else "/" + args.path
         return args.method, path, parse_json_arg(args.params) or {}, parse_json_arg(args.json)
@@ -239,7 +218,11 @@ def main():
     if not args.api_key:
         raise SystemExit("missing API key: set FINTRACK_OPEN_API_KEY or run get_open_api_key.sh first")
     method, path, params, payload = command_to_request(args)
-    status, body = request_json(args.base_url, args.api_key, method, path, params, payload)
+    extra_headers = {
+        "X-FinTrack-User": args.fintrack_user,
+        "X-Request-Id": args.request_id,
+    }
+    status, body = request_json(args.base_url, args.api_key, method, path, params, payload, extra_headers)
     print(json.dumps(body, ensure_ascii=False, indent=2))
     if status >= 400:
         raise SystemExit(1)

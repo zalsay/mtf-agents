@@ -24,7 +24,7 @@ Environment:
   MTF_API_ENV_FILE   Env output file, default: .env.open-api
 
 By default this script writes MTF_API_BASE_URL and FINTRACK_OPEN_API_KEY
-to .env.open-api, then prints the raw api_key once when a new key is created.
+to .env.open-api, then prints the newly exchanged raw api_key once.
 USAGE
 }
 
@@ -151,13 +151,6 @@ if status not in ("ok", "success"):
 api_key = (body.get("data") or {}).get("api_key")
 if not api_key:
     data = body.get("data") or {}
-    if data.get("has_existing_key"):
-        name = data.get("name", "existing key")
-        raise SystemExit(
-            f"FinTrack already has an active Open API key ({name}), "
-            "but raw keys are only shown when newly created. "
-            "Set FINTRACK_OPEN_API_KEY to the existing key, or revoke it and redeem a new temporary token."
-        )
     raise SystemExit("response did not include data.api_key")
 
 if write_env:

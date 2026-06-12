@@ -43,6 +43,7 @@ https://go-api.meetlife.com.cn:9001/api/open/v1
 ```http
 Authorization: Bearer <MTF_open_api_key>
 X-FinTrack-User: <optional external user alias>
+X-Request-Id: <optional caller request id>
 ```
 
 规则：
@@ -63,7 +64,7 @@ skills/mtf-etf-a-share-assistant/scripts/get_open_api_key.sh
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-hot
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-quotes 510300 159919
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-best --stock-type 2 --include-validation true
-skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --stock-code 510300 --stock-type 2 --prediction-type mtf-lite --horizon-len 7 --context-len 256 --prefer-cache
+skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --stock-code 510300 --stock-type 2 --prediction-type mtf-pro --horizon-len 7 --context-len 2048 --prefer-cache
 ```
 
 默认由用户在 FinTrack 前端生成 Open API 临时令牌，再交给 OpenClaw、Claude Code、Codex 等智能体兑换 key。用户名/密码换 key 仅作为用户明确授权的 legacy fallback。
@@ -86,15 +87,16 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --sto
    - `GET /api/open/v1/etf/lookup?symbol=...`：补齐 ETF 名称。
 
 4. **查询已有 MTF 结果**
+   - `GET /api/open/v1/watchlist`：确认当前 API key 用户关注清单；MTF 读取类接口只允许访问关注清单内标的。
    - `GET /api/open/v1/mtf/best?stock_type=2&include_validation=true`：查询可访问 best 与验证分块。
-   - `GET /api/open/v1/mtf/best/by-config`：按配置查询最新 unique key。
+   - `GET /api/open/v1/mtf/best/by-config`：默认只传 `symbol` 和 `stock_type`，聚合查询该标的所有可用配置 key；也可单独传 `horizon_len` 或 `context_len` 做过滤，两个都传时查询更精确的单配置/配置子集。
    - `GET /api/open/v1/mtf/future?unique_key=...`：查询未来预测序列。
 
 5. **触发预测**
-   - 单只 ETF 优先 `POST /api/open/v1/mtf/predict-once`，默认 `prefer_cache=true`。
-   - 训练 best 使用 `POST /api/open/v1/mtf/predict-best`。
-   - 轻量路径使用 `prediction_type=mtf-lite`；市场协变量路径使用 `prediction_type=mtf-pro`。
-   - 触发计算前必须说明是否已有缓存、是否需要新计算、可能耗时和权限约束。
+   - ETF 交易筛选只使用 `prediction_type=mtf-pro`，不使用 `mtf-lite` 兜底。
+   - 若 `mtf-best-by-config` 没有 pro unique key，先用 `POST /api/open/v1/mtf/predict-best` 训练 best，再重新查询 pro key。
+   - 已有 pro key 后，如 future 需要补算，可用 `POST /api/open/v1/mtf/predict-once` 并设置 `prefer_cache=true`。
+   - 触发计算前必须说明是否已有缓存、是否需要新计算、可能耗时和权限约束；创建 job 后读取 `estimated_inference_time_sec`，等待预计时间后再查询 job 状态。
 
 6. **回测与策略**
    - 使用 `POST /api/open/v1/mtf/backtest` 验证策略规则。
@@ -102,7 +104,7 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --sto
    - 自选股相关操作用 `GET/POST /api/open/v1/watchlist` 和 `POST /api/open/v1/watchlist/bind-strategy`。
 
 7. **输出结论**
-   - 给出候选排序表：ETF、主题、雷达优先级、行情、MTF 信号、验证质量、策略匹配、风险、下一步。
+   - 给出候选排序表：ETF、主题、雷达优先级、行情、实际采用的预测类型、`predicted_change_percent` 周期末值和路径、验证质量、策略匹配、风险、下一步。
    - 明确说明数据时间、预测参数、验证区间、偏差、模型局限和下一步 API 动作。
 
 ## 分析与输出要求
@@ -111,7 +113,7 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --sto
 
 1. 结论：1-3 条，说明推荐观察对象或“没有明确候选”。
 2. 证据：热门 ETF 指标、行情、MTF 预测、验证质量和回测结果。
-3. 策略：入场、离场、止损、再平衡、仓位限制、费用和失效条件。
+3. 策略：入场、离场、止损、再平衡、仓位限制、费用和失效条件；先用 `mtf-best-by-config` 聚合查询 symbol 下所有 key，只选择 pro key；交易指导信号使用 pro key 的 `predicted_change_percent`，并说明周期末值和路径特征。
 4. 风险：模型偏差、流动性、回撤、数据陈旧、主题拥挤、外部数据限制。
 5. 下一步：可执行 API、payload 或需要补齐的数据。
 
