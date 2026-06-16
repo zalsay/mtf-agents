@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sim Trade Reporter"
+  short_description: "记录模拟盘资金、成交、收益并生成JSON与HTML曲线报告"
+  default_prompt: "Use $sim-trade-reporter to add simulated-trading reporting: initial cash, daily trades, profit, return rate, actual equity, JSON trace, HTML table, and curve chart."

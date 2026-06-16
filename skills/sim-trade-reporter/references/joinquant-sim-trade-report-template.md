@@ -1,6 +1,6 @@
-# JoinQuant Sim Trade Report Template
+# Sim Trade Report Template
 
-Use this helper inside JoinQuant strategy code. It records initial cash, each day's trade results, daily/cumulative profit, daily/cumulative return, actual account equity, and writes an HTML report with tables and SVG curves.
+Use this helper inside simulated-trading strategy code. It records initial cash, each day's trade results, daily/cumulative profit, daily/cumulative return, actual account equity, and writes JSON trace plus an HTML report with tables and SVG curves.
 
 ```python
 # -*- coding: utf-8 -*-
@@ -11,7 +11,7 @@ def initialize(context):
     set_option('use_real_price', True)
     g.report_rows = []
     g.report_trades = []
-    g.initial_cash = float(context.portfolio.starting_cash)
+    g.initial_cash = 10000.0
     g.report_json_path = 'mtf_sim_trade_report.json'
     g.report_html_path = 'mtf_sim_trade_report.html'
 
@@ -30,7 +30,7 @@ def record_daily_report(context):
     total_value = float(portfolio.total_value)
     available_cash = float(portfolio.available_cash)
     positions_value = float(portfolio.positions_value)
-    initial_cash = float(getattr(g, 'initial_cash', portfolio.starting_cash))
+    initial_cash = float(getattr(g, 'initial_cash', 10000.0))
 
     previous_value = initial_cash
     if getattr(g, 'report_rows', None):
@@ -239,6 +239,6 @@ def esc(value):
 Notes:
 
 - `get_trades()` returns only the current day's trades, so call it from `after_trading_end(context)`.
-- `write_file()` writes into JoinQuant research files. Open `mtf_sim_trade_report.html` in the research file area to inspect the report.
-- The template stores only serializable values. JoinQuant warns against persisting mutable `context`, order, trade, or position objects.
+- `write_file()` writes into the target research files. Open `mtf_sim_trade_report.html` in the research file area to inspect the report.
+- The template stores only serializable values. Do not persist mutable `context`, order, trade, or position objects.
 - For simulated trading, keep `set_option('use_real_price', True)` unless the strategy has a documented reason to use adjusted-price behavior.

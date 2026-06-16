@@ -17,17 +17,24 @@ description: "当需要作为 MTF A 股 ETF 助手处理 ETF 筛选、热门 ETF
 - Open API 合约：`../mtf-service/docs/mtf/fintrack-open-api-contract.md`
 - 生产 Open API base URL：`https://go-api.meetlife.com.cn:9001`
 
-1. **明确目标**
+1. **检查昨日计划并执行模拟交易**
+   - 在开始新一轮 ETF 分析前，先检查 `reports/mtf-etf/` 目录下是否存在昨日的 `YYYY-MM-DD-trade-plan.md`。
+   - 若存在昨日交易计划，先读取计划内容，提取计划执行标的、目标仓位、目标金额、触发条件和失效条件。
+   - 按计划调用 `sim-trade-reporter` 对应的模拟交易/回测脚本，以实时价格执行计划中的买入/卖出动作，并把交易结果写入 JSON trace。
+   - 若昨日交易计划不存在，则跳过交易执行，继续进入本轮 ETF 研究。
+   - 任何基于昨日计划的执行都应以当前可得实时价格为准，严格遵守计划中的仓位和风控条件。
+
+2. **明确目标**
    - ETF 范围：热门 ETF 列表、用户提供的代码、自选股、行业/主题，或所有可访问的 ETF 预测。
    - 目标：短线筛选、MTF 预测、策略/回测、自选股更新，或可用于报告的解释。
    - 约束：预测周期、上下文长度、预测类型、会员等级、风险偏好、流动性/止损要求。
 
-2. **规范化 ETF 代码**
+3. **规范化 ETF 代码**
    - ETF/基金统一按 `stock_type=2` 处理。
    - 接受纯六位代码和带前缀形式，例如 `510300`、`sh510300`、`159919`、`sz159919`。
    - 保留用户可见的代码/名称，但传给 API 时使用规范化请求参数。
 
-3. **收集 ETF 候选**
+4. **收集 ETF 候选**
    - 优先使用 `GET /api/open/v1/etf/hot` 获取当前结构化热门 ETF 雷达数据。
    - 使用 `POST /api/open/v1/etf/quotes` 补充最新行情上下文。
    - 使用 `GET /api/open/v1/watchlist` 确认当前 API key 用户关注清单；该清单只作为当前 MTF 读取权限状态，不作为 ETF 候选范围硬限制。
@@ -35,11 +42,13 @@ description: "当需要作为 MTF A 股 ETF 助手处理 ETF 筛选、热门 ETF
    - 使用 `GET /api/open/v1/mtf/best?stock_type=2&include_validation=true` 查询已在关注清单内且可访问的 MTF best 预测。
    - 名称缺失时使用 `GET /api/open/v1/etf/lookup?symbol=...`。
 
-4. **运行或复用 MTF 预测**
+5. **运行或复用 MTF 预测**
    - 触发新计算前，优先复用缓存/公开预测。
    - 查询 `mtf/best`、`mtf/best/by-config`、`mtf/future` 前，必须确认 `symbol` 或 `unique_key` 对应标的在当前用户关注清单内；不在关注清单时，若该标的来自热门 ETF 初筛或用户明确指定，可直接调用 `watchlist-add` 自动添加后继续，不要因原 watchlist 较窄而停止筛选。
-   - 先调用 `GET /api/open/v1/mtf/best/by-config?symbol=<code>&stock_type=2`，不传 `horizon_len` 和 `context_len`，读取该标的所有可用配置的聚合 key 列表。
-   - 如果 `mtf/best/by-config` 返回 `not_found` 或聚合列表为空，说明该标的当前没有 best unique key；此时不要直接跳到 `predict-once`。应先调用 `POST /api/open/v1/mtf/predict-best` 发起 best 模型训练，读取响应中的 `estimated_inference_time_sec`，等待预计时间后再查询 `mtf-job` 状态；job 成功后再次查询 `mtf/best/by-config` 获取 unique key。
+   - **单个 ETF 的默认流程是先尝试 `GET /api/open/v1/mtf/future?unique_key=...`。**
+   - 若 `mtf-future` 返回“缺少最佳预测模型”“无法定位 `unique_key`”“future 不可用”或类似缺失 best 的错误，则进入补齐流程；若 `mtf-future` 返回其他业务错误，记录失败原因并将该 ETF 标记为失败完成，不继续重试同一标的。
+   - **补齐流程按顺序执行：`POST /api/open/v1/mtf/predict-best` -> `GET /api/open/v1/mtf/best/by-config?symbol=<code>&stock_type=2` -> `GET /api/open/v1/mtf/future?unique_key=...`。**
+   - 对缺失 best unique key 的标的，先调用 `POST /api/open/v1/mtf/predict-best` 发起 best 模型训练，读取响应中的 `estimated_inference_time_sec`，等待预计时间后再查询 `mtf-job` 状态；job 成功后再调用 `GET /api/open/v1/mtf/best/by-config?symbol=<code>&stock_type=2`，不传 `horizon_len` 和 `context_len`，读取该标的所有可用配置的聚合 key 列表。
    - 任何返回 `job_id` 的异步请求都遵循预计时间等待规则：优先使用响应中的 `estimated_inference_time_sec`，若该字段为空则使用 `queue_status` 和默认短等待；到预计时间前不要频繁查询 `mtf-job`。到点后若仍为 `queued`/`running`，再按低频间隔继续查询。
    - 从聚合 key 列表中只选择 `mtf_pro_unique_key`；缺少 pro key、pro 训练失败或 pro future 不可用时，剔除该候选，不再请求或使用 `mtf_lite_unique_key`。
    - 用户明确指定 `horizon_len` 或 `context_len` 时，可把任一参数单独传给 `mtf-best-by-config` 做过滤；两个参数都传时查询更精确的单配置/配置子集。
@@ -48,7 +57,7 @@ description: "当需要作为 MTF A 股 ETF 助手处理 ETF 筛选、热门 ETF
    - ETF 请求必须传 `stock_type=2`。
    - ETF 交易筛选只使用市场协变量路径 `prediction_type=mtf-pro`；不要为了交易决策请求 `mtf-lite`。
 
-5. **分析预测质量**
+6. **分析预测质量**
    - `GET /api/open/v1/mtf/future?unique_key=...` 返回后，优先读取 `predicted_change_percent`。这是 MTF 交易研究里的核心预测涨跌幅字段，用于衡量未来 `horizon_len` 序列的方向和幅度。
    - `predicted_change_percent` 是数组时，末值代表预测周期末相对 `change_base_value` 的涨跌幅；同时观察数组路径是否连续走强、走弱或震荡。若接口返回单值，按周期末预测涨跌幅处理。
    - 同一标的同时有 `mtf_pro_unique_key` 和 `mtf_lite_unique_key` 时，只使用 `mtf_pro_unique_key` 调用 `mtf-future`，不再做 lite/pro 对比；缺少 pro key 或 pro future 不可用时，剔除该候选。
@@ -56,15 +65,24 @@ description: "当需要作为 MTF A 股 ETF 助手处理 ETF 筛选、热门 ETF
    - 报告 `horizon_len`、`context_len`、`prediction_type`、best quantile/item、验证区间、最大偏差和数据陈旧风险。
    - 如果没有验证数据，明确说明无法基于当前 MTF 数据评估模型置信度。
 
-6. **设计策略**
+7. **策略选择定义**
+   - 当前默认策略为用户已明确指定的私有策略 `tpl_1781145238497_zqn80vbcn`（`3.5+-1`）。后续所有 ETF 的策略追踪判断、入场/离场/止损/再平衡判断都默认按该策略执行，直到用户主动提出修改。
+   - 若将来用户再次明确指定新的策略配置，则以最新明确指定者覆盖默认策略；除非用户主动提出修改，否则后续不再重复询问。
+   - 默认策略一经确定，后续仅在用户主动提出“修改默认策略”或“切换策略”时更新。
+
+8. **设计策略**
    - 将预测转成明确规则：入场、离场、止损、再平衡、仓位限制、费用和失效条件。
    - 默认把 `predicted_change_percent` 作为交易动作分层依据：末值明显为正且路径改善时可列为“候选/确认”，接近 0 或路径震荡时列为“观察”，为负且走弱时列为“回避/减仓观察”。具体阈值需结合 ETF 波动、费用、止损距离和用户风险约束。
    - 只有在用户要求或流程需要时，才保存可复用策略参数。
    - 推荐策略配置前，先用回测接口提供证据。
 
-7. **返回决策表**
+9. **返回决策表**
    - 按以下列对候选排序：ETF、主题、热门 ETF 分数/雷达优先级、最新行情、实际采用的预测类型、`predicted_change_percent` 周期末值和路径、验证质量、策略匹配度、风险、下一步动作。
    - 包含简洁结论和风险部分。
+   - 完成最终表后，如需模拟交易或回测报告，统一转由 `sim-trade-reporter` 处理。
+   - 同时生成“明日交易计划”文件，作为次日执行 `sim-trade-reporter` 的输入依据。
+   - `trade-plan` 至少要映射出计划执行标的、目标仓位、目标金额、触发条件、失效条件和执行顺序，便于第二天直接执行。
+   - 明确写出次日会先读取该 `trade-plan`，再由 `sim-trade-reporter` 按实时价格执行并写入 JSON trace。
 
 ## API 使用
 
@@ -305,15 +323,24 @@ paths:
 1. `GET /etf/hot` 获取热门 ETF 候选池。
 2. `POST /etf/quotes` 补充行情。
 3. `GET /watchlist` 确认当前用户关注清单；若候选不在关注清单，先让用户确认是否 `POST /watchlist` 添加。
-4. `GET /mtf/best/by-config?symbol=<code>&stock_type=2` 不传 horizon/context，获取该标的所有可用配置的聚合 key 列表。
-5. 只选择可用 `mtf_pro_unique_key`；缺少 pro 或 pro future 不可用时剔除该候选。如果用户指定周期/上下文，则只查询并使用对应单配置的 pro key。
-6. `GET /mtf/future?unique_key=...` 读取所选 key 的 `predicted_change_percent`。
+4. 对单个 ETF，**先尝试 `GET /mtf/future?unique_key=...`**；如果返回缺少最佳预测模型、无法定位 `unique_key`，或 future 不可用，再进入补齐流程。
+5. 补齐流程按顺序执行：`POST /mtf/predict-best` -> `GET /mtf/best/by-config?symbol=<code>&stock_type=2` -> `GET /mtf/future?unique_key=...`。
+6. 只选择可用 `mtf_pro_unique_key`；缺少 pro 或 pro future 不可用时剔除该候选。如果用户指定周期/上下文，则只查询并使用对应单配置的 pro key。
 7. 必要时 `GET /mtf/best?stock_type=2&include_validation=true` 查询关注清单内已有 best 与 validation，用于质量说明。
 8. 对缺失 best unique key 的标的，先调用 `POST /mtf/predict-best`；若响应返回 `job_id`，读取 `estimated_inference_time_sec` 并等待预计时间后再调用 `GET /mtf/jobs/{job_id}`。job `succeeded` 后重新查询 `/mtf/best/by-config` 获取 unique key；若 best 训练失败，记录失败原因并剔除该候选。
 9. 拿到 unique key 后调用 `GET /mtf/future?unique_key=...`；若 future 返回异步 `job_id`，同样按 `estimated_inference_time_sec` 等待后再查 job。若 future 不可用但 best key 已存在，可调用 `POST /mtf/predict-once` 并设置 `prefer_cache=true` 从 best `val_end_date` 续跑到当前可用 chunk。
-10. `POST /mtf/backtest` 验证策略参数。
-11. `POST /strategy/params` 保存策略。
-12. `POST /watchlist/bind-strategy` 更新用户工作台策略绑定。
+11. 当一轮候选 ETF 已经完成解读（包括成功与失败）后，先汇总成最终决策表并排序，**并固定输出为 Markdown 文件**；表格字段为：`ETF`、`主题`、`热门 ETF 分数/雷达优先级`、`最新行情`、`预测涨跌幅`（即 `predicted_change_percent` 的周期末值）、`路径特征`、`验证质量`、`策略匹配度`、`风险`、`下一步动作`；不要继续无目标扩展新 ETF。
+   - Markdown 文件必须保存到统一目录（默认 `reports/mtf-etf/`，如仓库另有约定则以仓库约定为准）。
+   - 文件命名必须使用 `YYYY-MM-DD-suggested-ETF.md` 格式。
+   - 最终表只保留已完成闭环或明确失败完成的标的；未完成闭环且未能给出失败原因的标的，不进入最终表。
+   - 在最终表之后，额外生成“明日交易计划”文件，文件名使用 `YYYY-MM-DD-trade-plan.md`，同样保存到 `reports/mtf-etf/`。
+   - `trade-plan.md` 至少包含：`日期`、`默认策略`、`前一日最终表摘要`、`计划执行标的`、`目标仓位`、`目标金额`、`触发条件`、`失效条件`、`执行顺序`、`风控备注`、`次日待记录字段`。
+   - 同时在文件中明确写出“次日将按 trade-plan 由 sim-trade-reporter 执行并记录到 JSON trace”。
+12. 当前 ETF 未完成 `future` 成功前，不得开始下一个 ETF；完成最终决策表后，直接进入第 15 条的策略追踪判断与策略接口检查，再决定是否继续回测或绑定策略。随后生成明日交易计划文件，为第二天执行时读取并驱动交易做准备。
+13. `POST /mtf/backtest` 验证策略参数。
+14. `POST /strategy/params` 保存策略。
+15. `POST /watchlist/bind-strategy` 更新用户工作台策略绑定。
+16. 在拿到基于 `mtf-future` 的最终表格后，直接调用策略接口进行策略追踪判断、策略读取和参数校验，并按默认策略执行判断；不要询问用户是否执行，也不要跳过最终表直接进入策略执行。若当前尚未定义默认策略，则在本轮结束时提示用户确认一个默认策略，确认后写入并沿用。
 
 ## ETF 筛选启发式
 
@@ -322,7 +349,7 @@ paths:
 - 候选质量：雷达优先级、等级、风险 RPS、月/周/日信号、趋势文本、止损距离。
 - 市场上下文：最新价格、涨跌幅、可用时的成交额/换手、行业/主题集中度。
 - MTF 信号：预测方向/幅度、预测周期、pro 预测类型、未来预测新鲜度；只使用 pro，不要求与 lite 对比。
-- 交易指导信号：优先读取 `predicted_change_percent`，使用周期末值判断预期方向和幅度，使用数组路径判断趋势质量；不得只看 `predicted_latest` 或单一价格点。
+- 交易指导信号：优先读取 `predicted_change_percent`，其中**周期末值统一命名为“预测涨跌幅”**；使用数组路径判断趋势质量；不得只看 `predicted_latest` 或单一价格点。
 - 验证质量：最大偏差、chunk 数量、实际/预测贴合度、陈旧刷新状态。
 - 策略匹配：预期波动是否覆盖费用和止损距离，风险预算是否能承受回撤，规则是否可解释。
 
@@ -334,8 +361,10 @@ paths:
 
 1. 结论：1-3 条，说明选中的 ETF，或说明“没有明确候选”。
 2. 证据表：候选指标和模型/策略信号。
-3. 策略：带参数的入场/离场/止损/再平衡规则，必须说明采用 pro，并给出 `predicted_change_percent` 周期末值和路径特征。
+3. 策略：带参数的入场/离场/止损/再平衡规则，给出 `预测涨跌幅`（即 `predicted_change_percent` 周期末值）和路径特征。
 4. 风险：模型、流动性、回撤、数据陈旧、主题拥挤、外部数据限制。
 5. 下一步 API 动作：如果用户要求执行，给出精确 endpoint 或 payload。
+6. 输出格式：最终结果固定写入一个 `.md` 文件后再展示其内容；文件保存到统一目录，命名格式为 `YYYY-MM-DD-suggested-ETF.md`。
+7. 完成标准：已完成闭环或明确失败完成的 ETF 进入最终表；若尚未失败完成，不纳入最终表也不输出为最终结论。
 
 不得隐藏缺失数据。应说明“当前 MTF 数据不足”，并列出所需的具体 endpoint/data。
