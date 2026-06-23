@@ -18,11 +18,15 @@ description: "当需要作为 MTF A 股 ETF 助手处理 ETF 筛选、热门 ETF
 - 生产 Open API base URL：`https://go-api.meetlife.com.cn:9001`
 
 1. **检查昨日计划并执行模拟交易**
-   - 在开始新一轮 ETF 分析前，先检查 `reports/mtf-etf/` 目录下是否存在昨日的 `YYYY-MM-DD-trade-plan.md`。
+   - 报告文件必须按日期目录保存：默认根目录为 `reports/mtf-etf/`，每个交易日使用独立子目录 `reports/mtf-etf/YYYY-MM-DD/`。
+   - 在开始新一轮 ETF 分析前，先检查昨日目录 `reports/mtf-etf/<昨日日期>/` 下是否存在昨日的 `YYYY-MM-DD-trade-plan.md`。
    - 若存在昨日交易计划，先读取计划内容，提取计划执行标的、目标仓位、目标金额、触发条件和失效条件。
-   - 按计划调用 `sim-trade-reporter` 对应的模拟交易/回测脚本，以实时价格执行计划中的买入/卖出动作，并把交易结果写入 JSON trace。
+   - 按计划调用 `sim-trade-reporter` 对应的模拟交易/回测脚本，成交价必须使用 `a-stock-data` skill 获取的当日实际价格，并把交易结果写入 JSON trace。
+   - 模拟交易禁止使用 MTF 预测价格、参考买入/卖出价、`etf-quotes` 最新可用价或其它替代行情作为成交价；若 `a-stock-data` 无法返回当日实际价格，必须标记为“未执行/待补价”，不得静默成交。
+   - 若已存在未平仓模拟持仓，即使当日没有新增买入/卖出，也必须继续跟踪已发起交易：用 `a-stock-data` skill 读取当日实际价格，重估持仓市值、现金、总资产、累计浮动盈亏和累计收益率，并更新当日 `YYYY-MM-DD-sim-trade-report.json`。
+   - H5/视频日报已有资产曲线页时，必须同步把最后一页更新为最新持仓估值曲线；页面文案使用“当日实际价”并标注交易日期，避免误读为预测价或最新可用替代价。
    - 若昨日交易计划不存在，则跳过交易执行，继续进入本轮 ETF 研究。
-   - 任何基于昨日计划的执行都应以当前可得实时价格为准，严格遵守计划中的仓位和风控条件。
+   - 任何基于昨日计划的执行都应以 `a-stock-data` 当日实际价格为准，严格遵守计划中的仓位和风控条件。
 
 2. **明确目标**
    - ETF 范围：热门 ETF 列表、用户提供的代码、自选股、行业/主题，或所有可访问的 ETF 预测。
@@ -39,7 +43,7 @@ description: "当需要作为 MTF A 股 ETF 助手处理 ETF 筛选、热门 ETF
    - 使用 `POST /api/open/v1/etf/quotes` 补充最新行情上下文。
    - 使用 `GET /api/open/v1/watchlist` 确认当前 API key 用户关注清单；该清单只作为当前 MTF 读取权限状态，不作为 ETF 候选范围硬限制。
    - 热门 ETF 或用户明确给出的 ETF 若不在关注清单，但需要读取 MTF 预测，可调用 `POST /api/open/v1/watchlist` 自动加入关注清单后继续查询；不要批量加入全部热门 ETF，只加入已通过行情初筛、需要进入 MTF 阶段的少量候选。
-   - 使用 `GET /api/open/v1/mtf/best?stock_type=2&include_validation=true` 查询已在关注清单内且可访问的 MTF best 预测。
+   - 使用 `GET /api/open/v1/mtf/best?stock_type=2&include_validation=true` 查询已在关注清单内且可访问的 MTF best 预测；其中 `include_validation` 仅表示若服务端提供验证数据则一并返回，并不影响 `future` 本身。
    - 名称缺失时使用 `GET /api/open/v1/etf/lookup?symbol=...`。
 
 5. **运行或复用 MTF 预测**
@@ -56,14 +60,21 @@ description: "当需要作为 MTF A 股 ETF 助手处理 ETF 筛选、热门 ETF
    - 单只 ETF 续跑或复用 future 前的补算使用 `POST /api/open/v1/mtf/predict-once`，并设置 `prefer_cache=true`；适用于已有 best unique key 后，从 best 验证末端续跑到当前可用 chunk 的场景。
    - ETF 请求必须传 `stock_type=2`。
    - ETF 交易筛选只使用市场协变量路径 `prediction_type=mtf-pro`；不要为了交易决策请求 `mtf-lite`。
+   - 每次 `mtf-future` 成功返回后，必须把该标的的 future 结果保存为 JSON 归档，路径默认写入当日目录 `reports/mtf-etf/YYYY-MM-DD/`；建议文件名为 `YYYY-MM-DD-mtf-future.json`，内容按 `unique_key` 或 `symbol` 做 upsert，保留原始响应、抓取时间、`prediction_type`、`horizon_len`、`context_len`、`future_dates`、`predicted_change_percent`、`change_base_date`、`change_base_value`、按日期基准换算后的预测价格路径以及预测路径下沿/上沿，便于后续按日期复核与二次引用。
 
 6. **分析预测质量**
    - `GET /api/open/v1/mtf/future?unique_key=...` 返回后，优先读取 `predicted_change_percent`。这是 MTF 交易研究里的核心预测涨跌幅字段，用于衡量未来 `horizon_len` 序列的方向和幅度。
-   - `predicted_change_percent` 是数组时，末值代表预测周期末相对 `change_base_value` 的涨跌幅；同时观察数组路径是否连续走强、走弱或震荡。若接口返回单值，按周期末预测涨跌幅处理。
+   - `predicted_change_percent` 是数组时，末值代表预测周期末相对 `change_base_date` 对齐 actual close 的涨跌幅；同时观察数组路径是否连续走强、走弱或震荡。若接口返回单值，按周期末预测涨跌幅处理。
+   - 当 `predicted_change_percent` 为数组且接口同时返回 `change_base_date` 与 `change_base_value` 时，必须进一步换算预测价格路径：对每个点按 `predicted_price_i = change_base_value * (1 + predicted_change_percent_i / 100)` 计算。这里的 `change_base_value` 必须理解为 `change_base_date` 对齐的 actual close，不是最新价、实时价或任意行情锚点。
+   - 不得用 `latest_close`、`etf-quotes` 最新价或盘中实时价替代 `change_base_value` 来换算预测路径，除非服务端明确说明 `change_base_date` 就是该行情日期且两者是同一 actual close。
+   - 不得把盘中实时价、今日最新价或任何未按 `future_dates` 对齐的 actual 值，直接与预测价格路径、预测区间上下沿、参考买入价或参考卖出价比较；实时价只能作为行情上下文单独展示。
+   - 预测命中、偏离、模型已落后、站上预测上沿、跌破预测下沿等判断，只能在对应 `future_dates[i]` 的 actual close 已经可用时，用 `actual_close_on_future_date_i` 与 `predicted_price_i` 做日期对齐比较。
+   - 在可换算出预测价格路径时，区间最低/最高只能命名为“预测路径下沿/上沿”或“研究参考路径”；不得直接把它写成可执行的买入价/卖出价。若要形成入场/离场规则，必须另行结合实际行情、波动、止损、流动性和日期对齐验证。
+   - 若只有单个预测值、缺少 `change_base_date` 或 `change_base_value`，或返回格式不足以恢复完整价格路径，则只能给出周期末预测涨跌幅/方向判断，不得声称已得到预测路径区间或参考买卖价。
    - 同一标的同时有 `mtf_pro_unique_key` 和 `mtf_lite_unique_key` 时，只使用 `mtf_pro_unique_key` 调用 `mtf-future`，不再做 lite/pro 对比；缺少 pro key 或 pro future 不可用时，剔除该候选。
-   - 对比 validation chunks 中的实际值与预测值。
-   - 报告 `horizon_len`、`context_len`、`prediction_type`、best quantile/item、验证区间、最大偏差和数据陈旧风险。
-   - 如果没有验证数据，明确说明无法基于当前 MTF 数据评估模型置信度。
+   - 如果服务端返回了验证数据，可参考其 actual 值与预测值的日期对齐差异，用于补充质量判断；必须区分历史 validation、未来 future 与实时行情观察。
+   - 报告 `horizon_len`、`context_len`、`prediction_type`、best quantile/item、`change_base_date`、`change_base_value`、验证区间（如有）、最大偏差和数据陈旧风险。
+   - 如果没有验证数据，明确说明当前只能基于 `future` 结果做方向和预测路径判断，无法补充历史质量对照，也不能用实时价替代 future actual 做命中验证。
 
 7. **策略选择定义**
    - 当前默认策略为用户已明确指定的私有策略 `tpl_1781145238497_zqn80vbcn`（`3.5+-1`）。后续所有 ETF 的策略追踪判断、入场/离场/止损/再平衡判断都默认按该策略执行，直到用户主动提出修改。
@@ -73,16 +84,25 @@ description: "当需要作为 MTF A 股 ETF 助手处理 ETF 筛选、热门 ETF
 8. **设计策略**
    - 将预测转成明确规则：入场、离场、止损、再平衡、仓位限制、费用和失效条件。
    - 默认把 `predicted_change_percent` 作为交易动作分层依据：末值明显为正且路径改善时可列为“候选/确认”，接近 0 或路径震荡时列为“观察”，为负且走弱时列为“回避/减仓观察”。具体阈值需结合 ETF 波动、费用、止损距离和用户风险约束。
+   - 在路径完整可换算时，只能把预测区间最低/最高称为预测路径下沿/上沿；不要把它们直接当作买入价/卖出价。交易策略里的入场、离场和止损应基于实际行情规则，并等待对应日期 actual 数据验证预测路径。
+   - 盘中实时价可以用于判断市场当前状态、流动性和是否需要更新数据，但不能用于判定预测路径是否命中、突破或失效。
    - 只有在用户要求或流程需要时，才保存可复用策略参数。
    - 推荐策略配置前，先用回测接口提供证据。
 
 9. **返回决策表**
-   - 按以下列对候选排序：ETF、主题、热门 ETF 分数/雷达优先级、最新行情、实际采用的预测类型、`predicted_change_percent` 周期末值和路径、验证质量、策略匹配度、风险、下一步动作。
+   - 按以下列对候选排序：ETF、主题、热门 ETF 分数/雷达优先级、最新行情观察、实际采用的预测类型、`predicted_change_percent` 周期末值和路径、`change_base_date`、`change_base_value`、预测路径下沿、预测路径上沿、日期对齐验证质量、策略匹配度、风险、下一步动作。
+   - 决策表中若展示实时价，必须标注为“行情观察”，不要写成“已接近预测上沿”“已高于预测区间”“模型路径已落后”等直接比较结论，除非已有同一 `future_date` 的 actual close 可供对齐验证。
+   - 最终面向用户的 Markdown 报告必须使用用户友好的自然语言，不直接暴露开发类术语、接口名、字段名、脚本名、JSON、trace、unique key、endpoint、payload 或内部 workflow 表述。
+   - 最终 Markdown 报告里的行情判断和交易建议只使用收盘价口径；盘中价、实时价、latest quote 只能用于内部检查或归档，不写入用户版最终结论。
+   - 用户版报告中的列名应写成“收盘价”“预计涨跌”“趋势节奏”“观察级别”“操作建议”“风险提示”等易读名称；内部字段如 `predicted_change_percent`、`change_base_date`、`change_base_value` 只能在内部归档或技术说明中保留。
+   - 用户版报告不得把预测路径最低/最高写成“买入价/卖出价”；如需引用，只能表达为“模型参考区间”或“预计节奏”，并明确交易触发仍以收盘价和风控规则为准。
    - 包含简洁结论和风险部分。
    - 完成最终表后，如需模拟交易或回测报告，统一转由 `sim-trade-reporter` 处理。
    - 同时生成“明日交易计划”文件，作为次日执行 `sim-trade-reporter` 的输入依据。
-   - `trade-plan` 至少要映射出计划执行标的、目标仓位、目标金额、触发条件、失效条件和执行顺序，便于第二天直接执行。
-   - 明确写出次日会先读取该 `trade-plan`，再由 `sim-trade-reporter` 按实时价格执行并写入 JSON trace。
+   - 当交易计划标题已经写明执行日期时，正文不要再使用“明日计划”这类相对日期小标题；优先使用“计划摘要”“具体执行”“观察优先级”等绝对、清晰的标题。
+   - `trade-plan` 至少要映射出计划执行标的、目标仓位、目标金额、预测路径下沿/上沿、触发条件、失效条件和执行顺序；触发条件必须使用实际行情规则，不得直接把预测路径下沿/上沿当作买卖价。
+   - 明确写出次日会先读取该 `trade-plan`，再由 `sim-trade-reporter` 按 `a-stock-data` skill 获取的当日实际价格执行并写入 JSON trace。
+   - 如果本轮已拿到 `mtf-future`，还要在同一日期目录里同步生成或更新 `YYYY-MM-DD-mtf-future.json`，把每个候选的 future 原始响应和解析结果归档，确保 markdown、模拟交易 trace 和 future 结果三者可互相追溯。
 
 ## API 使用
 
@@ -329,12 +349,13 @@ paths:
 7. 必要时 `GET /mtf/best?stock_type=2&include_validation=true` 查询关注清单内已有 best 与 validation，用于质量说明。
 8. 对缺失 best unique key 的标的，先调用 `POST /mtf/predict-best`；若响应返回 `job_id`，读取 `estimated_inference_time_sec` 并等待预计时间后再调用 `GET /mtf/jobs/{job_id}`。job `succeeded` 后重新查询 `/mtf/best/by-config` 获取 unique key；若 best 训练失败，记录失败原因并剔除该候选。
 9. 拿到 unique key 后调用 `GET /mtf/future?unique_key=...`；若 future 返回异步 `job_id`，同样按 `estimated_inference_time_sec` 等待后再查 job。若 future 不可用但 best key 已存在，可调用 `POST /mtf/predict-once` 并设置 `prefer_cache=true` 从 best `val_end_date` 续跑到当前可用 chunk。
-11. 当一轮候选 ETF 已经完成解读（包括成功与失败）后，先汇总成最终决策表并排序，**并固定输出为 Markdown 文件**；表格字段为：`ETF`、`主题`、`热门 ETF 分数/雷达优先级`、`最新行情`、`预测涨跌幅`（即 `predicted_change_percent` 的周期末值）、`路径特征`、`验证质量`、`策略匹配度`、`风险`、`下一步动作`；不要继续无目标扩展新 ETF。
-   - Markdown 文件必须保存到统一目录（默认 `reports/mtf-etf/`，如仓库另有约定则以仓库约定为准）。
+11. 当一轮候选 ETF 已经完成解读（包括成功与失败）后，先汇总成最终决策表并排序，**并固定输出为 Markdown 文件**；表格字段为：`ETF`、`主题`、`热门 ETF 分数/雷达优先级`、`最新行情观察`、`预测涨跌幅`（即 `predicted_change_percent` 的周期末值）、`路径特征`、`change_base_date`、`change_base_value`、`预测路径下沿`、`预测路径上沿`、`日期对齐验证质量`、`策略匹配度`、`风险`、`下一步动作`；不要继续无目标扩展新 ETF。
+   - Markdown 文件必须保存到统一日期目录（默认 `reports/mtf-etf/YYYY-MM-DD/`，如仓库另有约定则以仓库约定为准）；不得直接平铺到 `reports/mtf-etf/` 根目录。
    - 文件命名必须使用 `YYYY-MM-DD-suggested-ETF.md` 格式。
    - 最终表只保留已完成闭环或明确失败完成的标的；未完成闭环且未能给出失败原因的标的，不进入最终表。
-   - 在最终表之后，额外生成“明日交易计划”文件，文件名使用 `YYYY-MM-DD-trade-plan.md`，同样保存到 `reports/mtf-etf/`。
-   - `trade-plan.md` 至少包含：`日期`、`默认策略`、`前一日最终表摘要`、`计划执行标的`、`目标仓位`、`目标金额`、`触发条件`、`失效条件`、`执行顺序`、`风控备注`、`次日待记录字段`。
+   - 在最终表之后，额外生成“明日交易计划”文件，文件名使用 `YYYY-MM-DD-trade-plan.md`，同样保存到 `reports/mtf-etf/YYYY-MM-DD/`。
+   - 若交易计划标题包含具体执行日期，正文不要再出现“明日计划”“明日优先级”等相对日期标题；使用“计划摘要”“观察优先级”等不歧义标题。
+   - `trade-plan.md` 至少包含：`日期`、`默认策略`、`前一日最终表摘要`、`计划执行标的`、`目标仓位`、`目标金额`、`预测路径下沿`、`预测路径上沿`、`触发条件`、`失效条件`、`执行顺序`、`风控备注`、`次日待记录字段`；触发条件必须基于实际行情规则，不得直接把预测路径下沿/上沿当作买卖价。
    - 同时在文件中明确写出“次日将按 trade-plan 由 sim-trade-reporter 执行并记录到 JSON trace”。
 12. 当前 ETF 未完成 `future` 成功前，不得开始下一个 ETF；完成最终决策表后，直接进入第 15 条的策略追踪判断与策略接口检查，再决定是否继续回测或绑定策略。随后生成明日交易计划文件，为第二天执行时读取并驱动交易做准备。
 13. `POST /mtf/backtest` 验证策略参数。
@@ -349,7 +370,7 @@ paths:
 - 候选质量：雷达优先级、等级、风险 RPS、月/周/日信号、趋势文本、止损距离。
 - 市场上下文：最新价格、涨跌幅、可用时的成交额/换手、行业/主题集中度。
 - MTF 信号：预测方向/幅度、预测周期、pro 预测类型、未来预测新鲜度；只使用 pro，不要求与 lite 对比。
-- 交易指导信号：优先读取 `predicted_change_percent`，其中**周期末值统一命名为“预测涨跌幅”**；使用数组路径判断趋势质量；不得只看 `predicted_latest` 或单一价格点。
+- 交易指导信号：优先读取 `predicted_change_percent`，其中**周期末值统一命名为“预测涨跌幅”**；使用数组路径判断趋势质量；若同时有 `change_base_date` 与 `change_base_value`，还应换算预测价格路径并提取预测路径下沿/上沿；不得只看 `predicted_latest` 或单一价格点，不得把预测路径下沿/上沿直接写成买卖价。
 - 验证质量：最大偏差、chunk 数量、实际/预测贴合度、陈旧刷新状态。
 - 策略匹配：预期波动是否覆盖费用和止损距离，风险预算是否能承受回撤，规则是否可解释。
 
@@ -360,11 +381,13 @@ paths:
 面向用户的 ETF 工作使用以下结构：
 
 1. 结论：1-3 条，说明选中的 ETF，或说明“没有明确候选”。
-2. 证据表：候选指标和模型/策略信号。
-3. 策略：带参数的入场/离场/止损/再平衡规则，给出 `预测涨跌幅`（即 `predicted_change_percent` 周期末值）和路径特征。
+2. 证据表：使用用户可读字段，如收盘价、当日涨跌、预计涨跌、趋势节奏、观察级别、操作建议和风险提示；不要把内部字段名、接口名、脚本名或归档细节写入最终 Markdown。
+3. 策略：用自然语言说明入场、离场、止损、再平衡和仓位规则；交易触发条件必须基于收盘价和风控规则，并等待同一预测日期的实际收盘价做日期对齐验证。
 4. 风险：模型、流动性、回撤、数据陈旧、主题拥挤、外部数据限制。
-5. 下一步 API 动作：如果用户要求执行，给出精确 endpoint 或 payload。
-6. 输出格式：最终结果固定写入一个 `.md` 文件后再展示其内容；文件保存到统一目录，命名格式为 `YYYY-MM-DD-suggested-ETF.md`。
-7. 完成标准：已完成闭环或明确失败完成的 ETF 进入最终表；若尚未失败完成，不纳入最终表也不输出为最终结论。
+5. 下一步动作：只写用户能直接理解的观察、执行、等待或回避动作；不要在最终 Markdown 里写 API、endpoint 或 payload。
+6. 输出格式：最终结果固定写入一个 `.md` 文件后再展示其内容；文件保存到统一日期目录 `reports/mtf-etf/YYYY-MM-DD/`，命名格式为 `YYYY-MM-DD-suggested-ETF.md`。
+7. 输出补充：若本轮调用了 `mtf-future`，还应在同一日期目录下输出一个 `YYYY-MM-DD-mtf-future.json` 归档文件，保存原始 future 响应与解析后的路径结果，且按 `unique_key` 或 `symbol` upsert，避免重复覆盖掉已完成候选的历史记录。
+8. 完成标准：已完成闭环或明确失败完成的 ETF 进入最终表；若尚未失败完成，不纳入最终表也不输出为最终结论。
+9. 用户版最终报告不得出现以下开发类字眼：API、endpoint、payload、JSON、trace、unique_key、request、response、raw、watchlist、skill、workflow、字段、接口、脚本、Open API、mtf-pro、latest_close、change_base、future_dates、predicted_change_percent。若必须保留技术细节，应放在单独的内部归档文件，不进入用户版报告。
 
-不得隐藏缺失数据。应说明“当前 MTF 数据不足”，并列出所需的具体 endpoint/data。
+不得隐藏缺失数据。用户版最终报告应说明“当前数据不足以支持明确判断”，并用自然语言列出缺少的是收盘价、成交情况、历史对照还是趋势验证；不要在用户版报告里暴露内部接口或字段名称。

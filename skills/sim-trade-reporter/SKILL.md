@@ -32,10 +32,11 @@ Relevant JoinQuant primitives:
 3. Call `record_daily_report(context)` from `after_trading_end(context)`.
 4. Keep only serializable plain dict/list/string/number values in global state. Do not persist JoinQuant order, trade, position, or context objects.
 5. After every simulated trade / daily settlement, append the latest position and account snapshot into a JSON file for traceability. The JSON trace must keep the full evolution of cash, position value, total equity, and trade details so later runs can be replayed and compared.
-6. Generate both:
+6. For MTF ETF workflows, trade execution prices must come from the `a-stock-data` actual daily price for the execution date. Do not use predicted prices, reference buy/sell prices, stale latest-available ETF quotes, or model path prices as simulated trade prices. If the actual daily price is unavailable, record the execution as pending instead of silently substituting another source.
+7. Generate both:
    - a JSON source file for traceability;
    - an HTML report with summary cards, daily table, trade detail table, and SVG curves.
-7. Report these metrics for each trading day:
+8. Report these metrics for each trading day:
    - date;
    - initial cash;
    - actual total equity;
@@ -48,7 +49,7 @@ Relevant JoinQuant primitives:
    - trade count;
    - trade details from `get_trades()`;
    - current position snapshot.
-8. If the simulation is restarted or resumed, keep the JSON trace append-only by date: replace the same date snapshot instead of duplicating it, but preserve the full historical sequence across runs.
+9. If the simulation is restarted or resumed, keep the JSON trace append-only by date: replace the same date snapshot instead of duplicating it, but preserve the full historical sequence across runs.
 
 ## Implementation Template
 

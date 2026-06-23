@@ -88,9 +88,11 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --sto
 
 4. **查询已有 MTF 结果**
    - `GET /api/open/v1/watchlist`：确认当前 API key 用户关注清单；MTF 读取类接口只允许访问关注清单内标的。
-   - `GET /api/open/v1/mtf/best?stock_type=2&include_validation=true`：查询可访问 best 与验证分块。
+   - `GET /api/open/v1/mtf/best?stock_type=2&include_validation=true`：查询可访问 best 结果；如服务端返回验证信息则一并带出。
    - `GET /api/open/v1/mtf/best/by-config`：默认只传 `symbol` 和 `stock_type`，聚合查询该标的所有可用配置 key；也可单独传 `horizon_len` 或 `context_len` 做过滤，两个都传时查询更精确的单配置/配置子集。
    - `GET /api/open/v1/mtf/future?unique_key=...`：查询未来预测序列。
+   - 若 `mtf-future` 返回 `predicted_change_percent` 数组和 `change_base_value`，应把每个预测涨跌幅点换算为对应价格序列：`price_i = change_base_value * (1 + predicted_change_percent_i / 100)`。
+   - 在价格序列可换算时，区间最低对应价格作为参考买入价，区间最高对应价格作为参考卖出价；若只有单个预测值或缺少 `change_base_value`，则只能输出周期末参考价，不能声称已得到区间最低/最高价。
 
 5. **触发预测**
    - ETF 交易筛选只使用 `prediction_type=mtf-pro`，不使用 `mtf-lite` 兜底。
@@ -104,7 +106,7 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --sto
    - 自选股相关操作用 `GET/POST /api/open/v1/watchlist` 和 `POST /api/open/v1/watchlist/bind-strategy`。
 
 7. **输出结论**
-   - 给出候选排序表：ETF、主题、雷达优先级、行情、实际采用的预测类型、`predicted_change_percent` 周期末值和路径、验证质量、策略匹配、风险、下一步。
+   - 给出候选排序表：ETF、主题、雷达优先级、行情、实际采用的预测类型、`predicted_change_percent` 周期末值和路径、参考买入价、参考卖出价、验证质量、策略匹配、风险、下一步。
    - 明确说明数据时间、预测参数、验证区间、偏差、模型局限和下一步 API 动作。
 
 ## 分析与输出要求
@@ -113,7 +115,7 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --sto
 
 1. 结论：1-3 条，说明推荐观察对象或“没有明确候选”。
 2. 证据：热门 ETF 指标、行情、MTF 预测、验证质量和回测结果。
-3. 策略：入场、离场、止损、再平衡、仓位限制、费用和失效条件；先用 `mtf-best-by-config` 聚合查询 symbol 下所有 key，只选择 pro key；交易指导信号使用 pro key 的 `predicted_change_percent`，并说明周期末值和路径特征。
+3. 策略：入场、离场、止损、再平衡、仓位限制、费用和失效条件；先用 `mtf-best-by-config` 聚合查询 symbol 下所有 key，只选择 pro key；交易指导信号使用 pro key 的 `predicted_change_percent`，并说明周期末值、路径特征，以及基于 `change_base_value` 换算得到的参考买入价/参考卖出价。
 4. 风险：模型偏差、流动性、回撤、数据陈旧、主题拥挤、外部数据限制。
 5. 下一步：可执行 API、payload 或需要补齐的数据。
 
@@ -121,6 +123,6 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --sto
 
 - 只按单一分数排序。
 - 把热门 ETF 雷达分数直接等同于买入信号。
-- 忽略 validation chunks 或回测质量。
+- 忽略可用验证信息或回测质量。
 - 在数据不足时给确定性投资结论。
 - 将内部 `/save-predictions/*` 写入接口暴露给外部 agent。
