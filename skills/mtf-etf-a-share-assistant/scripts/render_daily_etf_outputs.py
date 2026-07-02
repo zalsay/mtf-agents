@@ -477,10 +477,9 @@ def render_trade_plan(report_date, sorted_candidates, account, market, market_tr
         step += 1
     if buy:
         amount = buy.target_amount
-        shares = int(amount // buy.close) if buy.close else 0
         lines.append(
             f"{step}. 用清仓后资金买入 `{buy.symbol}`，目标仓位 `{buy.target_weight}`，"
-            f"按 {report_date} 收盘价测算约 `{shares}` 份、目标金额约 `{amount:.2f}`。"
+            f"目标金额约 `{amount:.2f}`；实际成交按执行日开盘价计算，买入数量按 `100` 份整手向下取整。"
         )
         step += 1
     excluded = [candidate.symbol for candidate in sorted_candidates if candidate.action == "不执行"]

@@ -25,15 +25,19 @@ cd mtf-agents
 每日 ETF 工作流的脚本优先顺序：
 
 1. 用 `call_open_api.py` 获取候选、best key、future 预测和必要的 job 结果。
-2. 用 `normalize_mtf_future_archive.py` 归一化 `YYYY-MM-DD-mtf-future.json`。
-3. 用 `render_daily_etf_outputs.py` 从归一化归档和模拟账户文件生成：
+2. 用 `apply_daily_trade_plan.py` 按上一交易日计划生成当日模拟账户文件。
+3. 用 `normalize_mtf_future_archive.py` 归一化 `YYYY-MM-DD-mtf-future.json`。
+4. 用 `render_daily_etf_outputs.py` 从归一化归档和模拟账户文件生成：
    - `YYYY-MM-DD-suggested-ETF.md`
    - `YYYY-MM-DD-trade-plan.md`
-4. 用测试和禁词扫描验证结果。
+5. 用测试和禁词扫描验证结果。
 
 示例：
 
 ```bash
+skills/mtf-etf-a-share-assistant/scripts/apply_daily_trade_plan.py YYYY-MM-DD \
+  --write
+
 skills/mtf-etf-a-share-assistant/scripts/normalize_mtf_future_archive.py \
   reports/mtf-etf/YYYY-MM-DD/YYYY-MM-DD-mtf-future.json --in-place
 
@@ -124,9 +128,13 @@ deviation_points = actual_change_percent - expected_change_percent
 ### 交易动作
 
 `render_daily_etf_outputs.py` 负责把归一化归档和账户记录转成用户报告与交易计划。脚本规则优先，人工只做复核。
+`apply_daily_trade_plan.py` 负责把前一交易日计划落到当日模拟账户。
 
 核心规则：
 
+- 模拟交易成交价必须使用执行日实际开盘价；不得使用预测价、参考价、收盘价或盘中实时价替代。
+- 买入数量必须按 `100` 份一手向下取整；清仓卖出按当前持仓数量全部卖出。
+- 当日重复执行模拟交易时，必须替换同日期账户快照和同日期交易记录，不能重复追加。
 - “后续预计涨跌” = 末端预计涨跌 - 报告日同日预计涨跌。
 - 换仓优势 = 候选后续预计涨跌 - 当前持仓后续预计涨跌。
 - 当前持仓后续预计涨跌低于 `-1%` 时，优先清仓或目标仓位归零。
