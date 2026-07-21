@@ -30,7 +30,7 @@ cd mtf-agents
 
 每日 ETF 工作流的脚本优先顺序：
 
-1. 用 `call_open_api.py` 获取候选、best key、future 预测和必要的 job 结果。
+1. 用 `scripts/build_daily_archive.py --date YYYY-MM-DD` 一键构建当日 `YYYY-MM-DD-mtf-future.json`（内部完成 watchlist 候选筛选、mtf-future 拉取+异步 job 轮询、easy-tdx(QFQ) 当日收盘回填；`close_observation.source` 固定为 `easy_tdx_qfq_daily_kline` 避免拆分因子双计；单只预测/行情失败自动跳过继续）。
 2. 用 `apply_daily_trade_plan.py` 按上一交易日计划生成当日模拟账户文件。
 3. 用 `normalize_mtf_future_archive.py` 归一化 `YYYY-MM-DD-mtf-future.json`。
 4. 用 `render_daily_etf_outputs.py` 从归一化归档和模拟账户文件生成：
@@ -44,6 +44,9 @@ cd mtf-agents
 示例：
 
 ```bash
+# 1) 一键构建当日预测归档 (watchlist -> mtf-future + easy-tdx 回填)
+python3 scripts/build_daily_archive.py --date YYYY-MM-DD
+
 skills/mtf-etf-a-share-assistant/scripts/apply_daily_trade_plan.py YYYY-MM-DD \
   --write
 
