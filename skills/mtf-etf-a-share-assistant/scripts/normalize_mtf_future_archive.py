@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 import argparse
 import json
-from http.client import RemoteDisconnected
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+from corporate_action_adjustments import adjust_expected_change_path, comparable_price_factor
 
 
-TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
-ACTUAL_CLOSE_SOURCE = "a_stock_data_tencent_kline"
+DAILY_KLINE_ADJUST = "QFQ"
+DAILY_KLINE_LOOKBACK_COUNT = 1200
+ACTUAL_CLOSE_SOURCE = "easy_tdx_qfq_daily_kline"
 DEFAULT_CALENDAR = "XSHG"
 PRICE_DECIMALS = 4
 DEVIATION_DECIMALS = 4
 NEGATIVE_DEVIATION_REJECT_POINTS = -5.0
 NEGATIVE_DEVIATION_DOWNGRADE_POINTS = -3.0
+QFQ_EXPECTED_CHANGE_BASIS = "qfq_comparable_base"
 
 
 class NormalizeError(ValueError):
@@ -41,7 +41,7 @@ def parse_args():
     parser.add_argument(
         "--keep-existing-base-close",
         action="store_true",
-        help="Use existing base_close.close/change_base_value instead of fetching Tencent actual close",
+        help="Use existing base_close.close/change_base_value instead of fetching easy-tdx actual close",
     )
     parser.add_argument(
         "--skip-path-actuals",
@@ -103,6 +103,7 @@ def normalize_archive(
     data["predicted_close_calculation"] = "base_close.close * (1 + expected_change_percent / 100)"
     data["predicted_close_basis"] = "actual close on base_close.date"
     data["actual_base_close_source"] = ACTUAL_CLOSE_SOURCE if fetch_actual else "existing_archive_value"
+    data["actual_daily_kline_adjust"] = DAILY_KLINE_ADJUST if fetch_actual else None
     data["path_date_semantics"] = (
         "predicted_close_path points use target_date; each point is calculated from "
         "base_close.date/base_close.close, not from target_date close."
@@ -139,7 +140,7 @@ def normalize_item(
         or item.get("change_base_value")
         or raw_data.get("change_base_value")
     )
-    base_close = fetch_tencent_close(symbol, base_date) if fetch_actual else require_float(
+    base_close = fetch_actual_close(symbol, base_date) if fetch_actual else require_float(
         existing_base_close, f"{symbol} base close"
     )
     base_source = ACTUAL_CLOSE_SOURCE if fetch_actual else (
@@ -147,6 +148,19 @@ def normalize_item(
     )
     expected_path = extract_expected_change_path(item, raw_data, symbol)
     target_dates = resolve_target_dates(item, raw_data, base_date, len(expected_path), calendar_name, target_anchor)
+    raw_expected_path = None
+    adjustment_factors = None
+    if should_adjust_raw_expected_path(item, raw_data, fetch_actual):
+        adjusted_path, factors = adjust_expected_change_path(
+            symbol,
+            base_date,
+            target_dates,
+            expected_path,
+        )
+        if any(factor != 1 for factor in factors):
+            raw_expected_path = expected_path
+            expected_path = adjusted_path
+            adjustment_factors = factors
     predicted_path = build_predicted_close_path(base_date, base_close, target_dates, expected_path)
     close_observation = normalize_close_observation(item)
     path_as_of_date = resolve_path_as_of_date(item, raw_data, close_observation, archive_as_of_date)
@@ -169,6 +183,7 @@ def normalize_item(
             "date": base_date,
             "close": round(base_close, PRICE_DECIMALS),
             "source": base_source,
+            "adjust": DAILY_KLINE_ADJUST if fetch_actual else nested_get(item, "base_close", "adjust"),
             "note": "actual close on base_close.date",
         },
         "expected_change_percent_path": expected_path,
@@ -177,16 +192,36 @@ def normalize_item(
         "model_reference_range": build_model_reference_range(predicted_path),
     }
 
+    if raw_expected_path is not None:
+        normalized["expected_change_percent_basis"] = QFQ_EXPECTED_CHANGE_BASIS
+        normalized["raw_expected_change_percent_path"] = raw_expected_path
+        normalized["corporate_action_expected_change_factors"] = adjustment_factors
+    elif item.get("expected_change_percent_basis") == QFQ_EXPECTED_CHANGE_BASIS:
+        normalized["expected_change_percent_basis"] = QFQ_EXPECTED_CHANGE_BASIS
+        normalized["raw_expected_change_percent_path"] = item.get("raw_expected_change_percent_path")
+        normalized["corporate_action_expected_change_factors"] = item.get(
+            "corporate_action_expected_change_factors"
+        )
+
     if close_observation:
         normalized["close_observation"] = close_observation
         normalized["same_day_deviation_control"] = build_same_day_deviation_control(
             close_observation,
             predicted_path,
-            negative_deviation_reject_points,
-            negative_deviation_downgrade_points,
+            symbol=symbol,
+            reject_points=negative_deviation_reject_points,
+            downgrade_points=negative_deviation_downgrade_points,
         )
     if item.get("validation_summary"):
         normalized["validation_summary"] = item["validation_summary"]
+    if item.get("forward_expected_change_percent_path"):
+        normalized["forward_expected_change_percent_path"] = item["forward_expected_change_percent_path"]
+    if item.get("forward_target_dates"):
+        normalized["forward_target_dates"] = item["forward_target_dates"]
+    if item.get("forward_remaining_expected_percent") is not None:
+        normalized["forward_remaining_expected_percent"] = item["forward_remaining_expected_percent"]
+    if item.get("forward_reference_note"):
+        normalized["forward_reference_note"] = item["forward_reference_note"]
     normalized["predicted_close_calculation"] = "base_close.close * (1 + expected_change_percent / 100)"
     normalized["predicted_close_basis"] = "actual close on base_close.date"
     normalized["path_date_semantics"] = (
@@ -214,6 +249,22 @@ def extract_expected_change_path(item, raw_data, symbol):
     if not result:
         raise NormalizeError(f"{symbol} expected change percent path is empty")
     return result
+
+
+def should_adjust_raw_expected_path(item, raw_data, fetch_actual):
+    if item.get("expected_change_percent_basis") == QFQ_EXPECTED_CHANGE_BASIS:
+        return False
+    base_adjust = str(nested_get(item, "base_close", "adjust") or "").upper()
+    base_source = str(nested_get(item, "base_close", "source") or "").lower()
+    uses_qfq_base = fetch_actual or base_adjust == DAILY_KLINE_ADJUST or "qfq" in base_source
+    if not uses_qfq_base:
+        return False
+    if item.get("predicted_change_percent") is not None:
+        return True
+    return (
+        raw_data.get("predicted_change_percent") is not None
+        and item.get("expected_change_percent_path") is None
+    )
 
 
 def resolve_anchor_date(item, raw_data, base_date, target_anchor):
@@ -245,13 +296,14 @@ def build_predicted_close_path(base_date, base_close, target_dates, expected_pat
     if len(target_dates) != len(expected_path):
         raise NormalizeError("target date count must match expected change percent count")
     result = []
+    rounded_base_close = round(base_close, PRICE_DECIMALS)
     for index, (target_date, expected_change) in enumerate(zip(target_dates, expected_path), start=1):
-        predicted_close = round(base_close * (1 + expected_change / 100), PRICE_DECIMALS)
+        predicted_close = round(rounded_base_close * (1 + expected_change / 100), PRICE_DECIMALS)
         result.append(
             {
                 "step": index,
                 "base_date": base_date,
-                "base_close": round(base_close, PRICE_DECIMALS),
+                "base_close": rounded_base_close,
                 "target_date": target_date,
                 "expected_change_percent": expected_change,
                 "predicted_close": predicted_close,
@@ -333,7 +385,7 @@ def enrich_predicted_close_path(
         if actual is None and fetch_actual:
             try:
                 actual = {
-                    "close": fetch_tencent_close(symbol, target_date),
+                    "close": fetch_actual_close(symbol, target_date),
                     "source": ACTUAL_CLOSE_SOURCE,
                 }
             except NormalizeError:
@@ -348,6 +400,7 @@ def enrich_predicted_close_path(
                 actual["close"],
                 actual.get("source"),
                 point,
+                symbol=symbol,
                 reject_points=reject_points,
                 downgrade_points=downgrade_points,
             )
@@ -360,6 +413,7 @@ def calculate_path_point_deviation(
     actual_close,
     actual_close_source,
     point,
+    symbol=None,
     reject_points=NEGATIVE_DEVIATION_REJECT_POINTS,
     downgrade_points=NEGATIVE_DEVIATION_DOWNGRADE_POINTS,
 ):
@@ -368,15 +422,39 @@ def calculate_path_point_deviation(
         raise NormalizeError("base close cannot be zero when calculating path point deviation")
     expected_change_percent = require_float(point["expected_change_percent"], "expected change percent")
     actual_close = require_float(actual_close, "actual close")
-    actual_change_percent = round((actual_close / base_close - 1) * 100, DEVIATION_DECIMALS)
+    adjustment_factor = comparable_adjustment_factor(
+        symbol,
+        point.get("base_date"),
+        point.get("target_date"),
+        actual_close_source,
+    )
+    comparable_close = actual_close * adjustment_factor
+    actual_change_percent = round((comparable_close / base_close - 1) * 100, DEVIATION_DECIMALS)
     deviation_points = round(actual_change_percent - expected_change_percent, DEVIATION_DECIMALS)
-    return {
+    result = {
         "actual_close": round(actual_close, PRICE_DECIMALS),
         "actual_close_source": actual_close_source or "actual_close",
         "actual_change_percent": actual_change_percent,
         "deviation_percentage_points": deviation_points,
         "deviation_status": classify_deviation_status(deviation_points, reject_points, downgrade_points),
     }
+    if adjustment_factor != 1:
+        result["actual_close_comparable"] = round(comparable_close, PRICE_DECIMALS)
+        result["corporate_action_adjustment_factor"] = round(adjustment_factor, PRICE_DECIMALS)
+    return result
+
+
+def comparable_adjustment_factor(symbol, base_date, target_date, actual_close_source):
+    if not symbol:
+        return 1.0
+    if is_forward_adjusted_source(actual_close_source):
+        return 1.0
+    return comparable_price_factor(symbol, base_date, target_date)
+
+
+def is_forward_adjusted_source(actual_close_source):
+    source = (actual_close_source or "").lower()
+    return "qfq" in source or "forward_adjust" in source
 
 
 def classify_deviation_status(deviation_points, reject_points, downgrade_points):
@@ -390,6 +468,7 @@ def classify_deviation_status(deviation_points, reject_points, downgrade_points)
 def build_same_day_deviation_control(
     close_observation,
     predicted_path,
+    symbol=None,
     reject_points=NEGATIVE_DEVIATION_REJECT_POINTS,
     downgrade_points=NEGATIVE_DEVIATION_DOWNGRADE_POINTS,
 ):
@@ -415,6 +494,7 @@ def build_same_day_deviation_control(
         actual_close,
         close_observation.get("source") or "close_observation",
         matched_point,
+        symbol=symbol,
         reject_points=reject_points,
         downgrade_points=downgrade_points,
     )
@@ -435,6 +515,9 @@ def build_same_day_deviation_control(
         "clear_if_held": False,
         "note": "Actual change percent is not below expected_change_percent by the negative-deviation risk threshold.",
     }
+    if "actual_close_comparable" in point_deviation:
+        control["actual_close_comparable"] = point_deviation["actual_close_comparable"]
+        control["corporate_action_adjustment_factor"] = point_deviation["corporate_action_adjustment_factor"]
     if point_deviation["deviation_status"] == "reject":
         control.update(
             {
@@ -484,28 +567,60 @@ def future_trading_dates(anchor_date, count, calendar_name=DEFAULT_CALENDAR):
     return dates
 
 
+def fetch_actual_close(symbol, trading_date):
+    return fetch_easy_tdx_close(symbol, trading_date)
+
+
 def fetch_tencent_close(symbol, trading_date):
-    quote_code = tencent_quote_code(symbol)
-    params = {
-        "param": f"{quote_code},day,{trading_date},{trading_date},1",
-    }
-    url = TENCENT_KLINE_URL + "?" + urlencode(params)
-    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    return fetch_actual_close(symbol, trading_date)
+
+
+def fetch_easy_tdx_close(symbol, trading_date, adjust=DAILY_KLINE_ADJUST):
+    market, code = easy_tdx_market_code(symbol)
     try:
-        with urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, RemoteDisconnected, TimeoutError, OSError) as exc:
-        raise NormalizeError(f"{symbol} Tencent daily close request failed for {trading_date}: {exc}") from exc
-    day_rows = nested_get(payload, "data", quote_code, "day") or []
-    for row in day_rows:
-        if len(row) >= 3 and row[0] == trading_date:
-            return require_float(row[2], f"{symbol} Tencent close on {trading_date}")
-    raise NormalizeError(f"{symbol} missing Tencent daily close for {trading_date}")
+        from easy_tdx.cli.conn import get_mac_client
+        from easy_tdx.cli.parsers import parse_adjust, parse_market, parse_period
+    except ImportError as exc:
+        raise NormalizeError("missing easy-tdx dependency: run `python3 -m pip install easy-tdx`") from exc
+
+    try:
+        with get_mac_client() as client:
+            frame = client.get_stock_kline(
+                parse_market(market),
+                code,
+                period=parse_period("DAILY"),
+                start=0,
+                count=DAILY_KLINE_LOOKBACK_COUNT,
+                adjust=parse_adjust(adjust),
+            )
+    except Exception as exc:
+        raise NormalizeError(f"{symbol} easy-tdx {adjust} daily close request failed for {trading_date}: {exc}") from exc
+
+    for row in frame.to_dict("records"):
+        if normalize_easy_tdx_date(row.get("datetime")) == trading_date:
+            return require_float(row.get("close"), f"{symbol} easy-tdx {adjust} close on {trading_date}")
+    raise NormalizeError(f"{symbol} missing easy-tdx {adjust} daily close for {trading_date}")
 
 
 def tencent_quote_code(symbol):
     code = str(symbol)
     return tencent_market_prefix(code) + code
+
+
+def easy_tdx_market_code(symbol):
+    code = str(symbol)
+    if code.startswith(("5", "6", "9")):
+        return "SH", code
+    if code.startswith(("4", "8")):
+        return "BJ", code
+    return "SZ", code
+
+
+def normalize_easy_tdx_date(value):
+    text = str(value)
+    if "T" in text:
+        return text.split("T", 1)[0]
+    return text[:10]
 
 
 def tencent_market_prefix(symbol):

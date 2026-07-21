@@ -1,2 +1,5 @@
 reports/
 .env.open-api
+.workbuddy/
+__pycache__/
+*.pyc

@@ -11,6 +11,7 @@ DEFAULT_TARGET_WEIGHT = 0.95
 SWITCH_THRESHOLD_POINTS = 8.0
 EXIT_THRESHOLD_PERCENT = -1.0
 MARKET_CRASH_THRESHOLD_PERCENT = -3.0
+DEFAULT_CALENDAR = "XSHG"
 FORBIDDEN_MARKDOWN_TERMS = [
     "API",
     "endpoint",
@@ -124,6 +125,26 @@ def next_calendar_day(date_text):
     return (datetime.strptime(date_text, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
 
 
+def next_trading_day(date_text, calendar_name=DEFAULT_CALENDAR):
+    current = datetime.strptime(date_text, "%Y-%m-%d").date()
+    try:
+        import exchange_calendars as xcals
+        import pandas as pd
+
+        calendar = xcals.get_calendar(calendar_name)
+        start = pd.Timestamp(current + timedelta(days=1))
+        end = pd.Timestamp(current + timedelta(days=14))
+        sessions = calendar.sessions_in_range(start, end)
+        if len(sessions):
+            return sessions[0].date().isoformat()
+    except ImportError:
+        pass
+    candidate = current + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate.isoformat()
+
+
 def default_paths(args):
     root = Path(args.report_root)
     output_dir = Path(args.output_dir) if args.output_dir else root / args.report_date
@@ -165,7 +186,9 @@ def build_candidate(item, report_date, market_risk_label):
     final_expected = item.get("expected_change_percent_final")
     same_expected = control.get("expected_change_percent")
     remaining = None
-    if final_expected is not None and same_expected is not None:
+    if item.get("forward_remaining_expected_percent") is not None:
+        remaining = round4(item.get("forward_remaining_expected_percent"))
+    elif final_expected is not None and same_expected is not None:
         remaining = round4(float(final_expected) - float(same_expected))
     reference = item.get("model_reference_range") or {}
     return Candidate(
@@ -193,7 +216,7 @@ def is_buy_allowed(candidate):
     )
 
 
-def classify_candidates(candidates, account, market_triggered, args):
+def classify_candidates(candidates, account, market_triggered, args, market_blocked=False):
     holding = next((candidate for candidate in candidates if candidate.symbol == account.holding_symbol), None)
     holding_remaining = holding.remaining_expected_percent if holding else None
 
@@ -217,18 +240,18 @@ def classify_candidates(candidates, account, market_triggered, args):
         )
 
     switch_target = None
-    if not market_triggered and top_buyable and account.holding_symbol:
+    if not market_triggered and not market_blocked and top_buyable and account.holding_symbol:
         advantage = top_buyable.relative_to_holding
         if advantage is not None and advantage >= args.switch_threshold_points:
             switch_target = top_buyable
         elif should_clear_holding and advantage is not None and advantage >= 5.0:
             switch_target = top_buyable
-    elif not market_triggered and top_buyable and not account.holding_symbol:
+    elif not market_triggered and not market_blocked and top_buyable and not account.holding_symbol:
         switch_target = top_buyable
 
     for candidate in candidates:
         fill_candidate_labels(candidate)
-        candidate.market_risk_label = "触发" if market_triggered else "未触发"
+        candidate.market_risk_label = market_risk_label(market_triggered, market_blocked)
         candidate.target_weight = "0"
         candidate.target_amount = 0.0
         candidate.account_note = "不作为买入方向"
@@ -239,7 +262,7 @@ def classify_candidates(candidates, account, market_triggered, args):
             holding.action = "清仓"
             holding.level = "退出"
             holding.target_weight = "0"
-            holding.account_note = "当前持仓有效"
+            holding.account_note = "当前持仓需退出"
             holding.invalidation = "后续预计涨跌重新回到退出线以上时重算"
         else:
             holding.action = "持有"
@@ -270,6 +293,10 @@ def classify_candidates(candidates, account, market_triggered, args):
             candidate.level = "降级观察"
             candidate.account_note = "不作为买入方向"
             candidate.invalidation = "降级未解除前不切换"
+        elif candidate.deviation_status in {"no_same_day_match", "actual_unavailable", "unknown"}:
+            candidate.level = "待确认"
+            candidate.account_note = "缺少同日对照"
+            candidate.invalidation = "同日对照补齐后再重算"
         elif candidate.remaining_expected_percent is None:
             candidate.level = "待确认"
             candidate.account_note = "缺少同日对照"
@@ -282,6 +309,14 @@ def classify_candidates(candidates, account, market_triggered, args):
             candidate.level = "备选"
             candidate.account_note = "优先级低于主候选"
             candidate.invalidation = "主候选失效后再重算"
+        elif market_triggered:
+            candidate.level = "观察"
+            candidate.account_note = "市场风控触发"
+            candidate.invalidation = "市场风控解除后再重算"
+        elif market_blocked:
+            candidate.level = "候选观察"
+            candidate.account_note = "市场风控待确认"
+            candidate.invalidation = "市场风控确认后再重算"
         else:
             candidate.level = "候选观察"
             candidate.account_note = "优势不足"
@@ -295,6 +330,8 @@ def fill_candidate_labels(candidate):
         candidate.rhythm = "实际表现明显弱于同日预计"
     elif candidate.deviation_status == "downgrade":
         candidate.rhythm = "实际表现低于同日预计，已降级"
+    elif candidate.deviation_status in {"no_same_day_match", "actual_unavailable", "unknown"}:
+        candidate.rhythm = "缺少同日对照"
     elif candidate.remaining_expected_percent is None:
         candidate.rhythm = "缺少同日对照"
     elif candidate.remaining_expected_percent < 0:
@@ -319,9 +356,32 @@ def market_risk(data, args):
     risk = data.get("market_index_risk") or {}
     expected = risk.get("expected_change_percent")
     triggered = bool(risk.get("triggered"))
+    status = str(risk.get("status") or "").lower()
+    blocked = bool(risk.get("buy_blocked")) or expected is None or status in {
+        "unknown",
+        "unavailable",
+        "no_same_day_match",
+    }
     if expected is not None and float(expected) <= args.market_crash_threshold_percent:
         triggered = True
-    return risk, triggered
+    return risk, triggered, blocked
+
+
+def market_risk_label(market_triggered, market_blocked):
+    if market_triggered:
+        return "触发"
+    if market_blocked:
+        return "待确认"
+    return "未触发"
+
+
+def market_risk_summary(market, market_triggered, market_blocked):
+    expected = fmt_percent(market.get("expected_change_percent"))
+    if market_triggered:
+        return f"上证指数同日预计涨跌为 `{expected}`，触发大盘大跌风控"
+    if market_blocked:
+        return f"上证指数同日预计涨跌为 `{expected}`，暂未确认，本轮不新增或换仓"
+    return f"上证指数同日预计涨跌为 `{expected}`，未触发大盘大跌风控"
 
 
 def trade_summary(sorted_candidates, account):
@@ -338,7 +398,15 @@ def trade_summary(sorted_candidates, account):
     return "不新增、不换仓"
 
 
-def render_suggested(report_date, data, sorted_candidates, account, market, market_triggered):
+def prediction_window_expired(candidate):
+    return (
+        candidate is not None
+        and candidate.deviation_status == "pass"
+        and round4(candidate.remaining_expected_percent) == 0
+    )
+
+
+def render_suggested(report_date, data, sorted_candidates, account, market, market_triggered, market_blocked=False):
     buy = next((candidate for candidate in sorted_candidates if candidate.action == "买入"), None)
     holding = next((candidate for candidate in sorted_candidates if candidate.symbol == account.holding_symbol), None)
     lines = [
@@ -346,7 +414,7 @@ def render_suggested(report_date, data, sorted_candidates, account, market, mark
         "",
         "## 核心结论",
         "",
-        f"- 上证指数同日预计涨跌为 `{fmt_percent(market.get('expected_change_percent'))}`，{'触发大盘大跌风控' if market_triggered else '未触发大盘大跌风控'}。",
+        f"- {market_risk_summary(market, market_triggered, market_blocked)}。",
     ]
     if account.holding_symbol:
         holding_close = f"，今天收盘价 `{holding.close:.3f}`" if holding and holding.close is not None else ""
@@ -364,6 +432,11 @@ def render_suggested(report_date, data, sorted_candidates, account, market, mark
         lines.append(f"- `{holding.symbol}` 后续预计涨跌约 `{fmt_percent(holding.remaining_expected_percent)}`。")
     elif buy:
         lines.append(f"- `{buy.symbol}` 后续预计涨跌约 `{fmt_percent(buy.remaining_expected_percent)}`。")
+    if prediction_window_expired(holding):
+        lines.append(
+            f"- `{holding.symbol}` 本段预测窗口已到期，但到期本身不作为清仓信号；"
+            "下一交易日早上刷新下一批预测后再重算。"
+        )
     lines.append(f"- 本轮明确结果：{trade_summary(sorted_candidates, account)}。")
     lines.extend(["", "## 证据表", ""])
     lines.append(
@@ -382,8 +455,7 @@ def render_suggested(report_date, data, sorted_candidates, account, market, mark
             "",
             "## 市场风控",
             "",
-            f"- 上证指数同日预计涨跌为 `{fmt_percent(market.get('expected_change_percent'))}`，"
-            f"{'低于或等于 -3%，本轮以清仓防守为先' if market_triggered else '未低于 `-3%`，因此没有触发清仓防守'}。",
+            f"- {market_risk_detail(market, market_triggered, market_blocked)}。",
             "",
             "## 交易判断",
             "",
@@ -398,11 +470,26 @@ def render_suggested(report_date, data, sorted_candidates, account, market, mark
             "## 风险提示",
             "",
             "- 今日判断只基于收盘价和同日对照后的涨跌幅差异，不使用盘中价格判断预测是否有效。",
-            "- 上证指数风控未触发不代表可以追高，仍需遵守 ETF 自身偏差和换仓优势规则。",
+            market_risk_tip(market_triggered, market_blocked),
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def market_risk_detail(market, market_triggered, market_blocked):
+    expected = fmt_percent(market.get("expected_change_percent"))
+    if market_triggered:
+        return f"上证指数同日预计涨跌为 `{expected}`，低于或等于 -3%，本轮以清仓防守为先"
+    if market_blocked:
+        return f"上证指数同日状态暂未确认，本轮不新增买入或换仓，只保留持有、减仓或清仓动作"
+    return f"上证指数同日预计涨跌为 `{expected}`，未低于 `-3%`，因此没有触发清仓防守"
+
+
+def market_risk_tip(market_triggered, market_blocked):
+    if market_blocked and not market_triggered:
+        return "- 上证指数风控暂未确认时，不新增、不换仓，只保留持有、减仓或清仓动作。"
+    return "- 上证指数风控未触发不代表可以追高，仍需遵守 ETF 自身偏差和换仓优势规则。"
 
 
 def suggest_action(candidate):
@@ -421,8 +508,8 @@ def suggest_action(candidate):
     return candidate.action
 
 
-def render_trade_plan(report_date, sorted_candidates, account, market, market_triggered):
-    plan_date = next_calendar_day(report_date)
+def render_trade_plan(report_date, sorted_candidates, account, market, market_triggered, market_blocked=False):
+    plan_date = next_trading_day(report_date)
     summary = trade_summary(sorted_candidates, account)
     buy = next((candidate for candidate in sorted_candidates if candidate.action == "买入"), None)
     holding = next((candidate for candidate in sorted_candidates if candidate.symbol == account.holding_symbol), None)
@@ -441,6 +528,13 @@ def render_trade_plan(report_date, sorted_candidates, account, market, market_tr
         )
     elif market_triggered:
         lines.append("上证指数同日预计跌幅触发大盘风控，本轮不新增买入。")
+    elif market_blocked:
+        lines.append("上证指数同日状态暂未确认，本轮不新增买入或换仓。")
+    if prediction_window_expired(holding):
+        lines.append(
+            f"`{holding.symbol}` 本段预测窗口已到期；{plan_date} 早上先刷新下一批预测后再重算，"
+            "本段到期本身不作为清仓信号。"
+        )
     lines.extend(["", "## 账户状态", ""])
     holding_text = "无持仓"
     if account.holding_symbol:
@@ -482,6 +576,9 @@ def render_trade_plan(report_date, sorted_candidates, account, market, market_tr
             f"目标金额约 `{amount:.2f}`；实际成交按执行日开盘价计算，买入数量按 `100` 份整手向下取整。"
         )
         step += 1
+    if prediction_window_expired(holding):
+        lines.append(f"{step}. {plan_date} 早上先刷新 `{holding.symbol}` 的下一批预测，再重新计算持有或退出。")
+        step += 1
     excluded = [candidate.symbol for candidate in sorted_candidates if candidate.action == "不执行"]
     if excluded:
         lines.append(f"{step}. 不买入 {join_symbols(excluded)}。")
@@ -511,6 +608,8 @@ def risk_text(candidate):
         return f"降级观察，偏差 {fmt_points(candidate.deviation_points)}"
     if candidate.deviation_status == "pass":
         return f"可采纳，偏差 {fmt_points(candidate.deviation_points)}"
+    if candidate.deviation_status in {"no_same_day_match", "actual_unavailable", "unknown"}:
+        return "待确认"
     return "待确认"
 
 
@@ -528,12 +627,27 @@ def main():
     output_dir, future_json, sim_report = default_paths(args)
     data = load_json(future_json)
     account = latest_account_state(sim_report)
-    market, market_triggered = market_risk(data, args)
-    market_label = "触发" if market_triggered else "未触发"
+    market, market_triggered, market_blocked = market_risk(data, args)
+    market_label = market_risk_label(market_triggered, market_blocked)
     candidates = [build_candidate(item, args.report_date, market_label) for item in data.get("items", [])]
-    sorted_candidates = classify_candidates(candidates, account, market_triggered, args)
-    suggested = render_suggested(args.report_date, data, sorted_candidates, account, market, market_triggered)
-    trade_plan = render_trade_plan(args.report_date, sorted_candidates, account, market, market_triggered)
+    sorted_candidates = classify_candidates(candidates, account, market_triggered, args, market_blocked)
+    suggested = render_suggested(
+        args.report_date,
+        data,
+        sorted_candidates,
+        account,
+        market,
+        market_triggered,
+        market_blocked,
+    )
+    trade_plan = render_trade_plan(
+        args.report_date,
+        sorted_candidates,
+        account,
+        market,
+        market_triggered,
+        market_blocked,
+    )
 
     if args.check_terms:
         hits = check_forbidden_terms(suggested, trade_plan)

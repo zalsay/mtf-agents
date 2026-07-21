@@ -5,17 +5,16 @@ import re
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from corporate_action_adjustments import adjustments_between, share_factor_between
 
 
 DEFAULT_REPORT_ROOT = Path("reports/mtf-etf")
 DEFAULT_INITIAL_CASH = 10000
 DEFAULT_TARGET_WEIGHT = 0.95
 DEFAULT_LOT_SIZE = 100
-TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
-PRICE_SOURCE = "a-stock-data actual daily open"
+DAILY_KLINE_ADJUST = "QFQ"
+DAILY_KLINE_LOOKBACK_COUNT = 1200
+PRICE_SOURCE = f"easy-tdx {DAILY_KLINE_ADJUST} daily open execution and close valuation"
 
 
 class SimTradeError(ValueError):
@@ -141,10 +140,16 @@ def first_position(row):
 def apply_plan(previous_report, actions, execution_date, target_weight, lot_size):
     previous_row = latest_account_row(previous_report)
     position = first_position(previous_row)
+    share_adjustments = apply_position_share_adjustments(
+        position,
+        previous_row.get("date"),
+        execution_date,
+    )
     cash = float(previous_row.get("available_cash") or 0.0)
     previous_total = float(previous_row.get("total_value") or 0.0)
     trades = []
     open_prices = {}
+    close_prices = {}
 
     clear_symbols = {action["symbol"] for action in actions if action["action"] == "清仓"}
     buy_actions = [action for action in actions if action["action"] == "买入"]
@@ -152,17 +157,17 @@ def apply_plan(previous_report, actions, execution_date, target_weight, lot_size
     if position and position.get("symbol") in clear_symbols:
         symbol = position["symbol"]
         amount = int(position.get("amount") or 0)
-        price = get_open_price(open_prices, symbol, execution_date)
+        price = get_price(open_prices, symbol, execution_date, "open")
         value = round(amount * price, 3)
         cash += value
         trades.append(build_trade(execution_date, symbol, position.get("name") or "", "sell", amount, price, value))
         position = None
 
-    total_after_sells = cash + position_value(position, open_prices, execution_date)
+    total_after_sells = cash + position_value(position, close_prices, execution_date, "close")
 
     for action in buy_actions:
         symbol = action["symbol"]
-        price = get_open_price(open_prices, symbol, execution_date)
+        price = get_price(open_prices, symbol, execution_date, "open")
         desired_weight = action.get("target_weight") or target_weight
         desired_value = min(cash, total_after_sells * desired_weight)
         amount = floor_to_lot(desired_value / price, lot_size)
@@ -181,7 +186,7 @@ def apply_plan(previous_report, actions, execution_date, target_weight, lot_size
 
     if position:
         symbol = position["symbol"]
-        price = get_open_price(open_prices, symbol, execution_date)
+        price = get_price(close_prices, symbol, execution_date, "close")
         amount = int(position.get("amount") or 0)
         value = round(amount * price, 3)
         position.update({"price": price, "value": round(value, 2)})
@@ -210,61 +215,133 @@ def apply_plan(previous_report, actions, execution_date, target_weight, lot_size
     }
 
     result = deepcopy(previous_report)
+    result.pop("current_fund_performance", None)
     result["report_date"] = execution_date
     result["valuation_source"] = PRICE_SOURCE
     result["price_source_detail"] = {
-        "provider": "tencent_kline",
+        "provider": "easy_tdx",
+        "period": "DAILY",
+        "adjust": DAILY_KLINE_ADJUST,
         "trade_date": execution_date,
-        "price_field": "open",
+        "trade_price_field": "open",
+        "valuation_price_field": "close",
         "lot_size": lot_size,
         "executed_trades": [
             {"symbol": t["security"], "open": t["price"], "side": t["side"], "amount": t["amount"]}
             for t in trades
         ],
+        "share_adjustments": share_adjustments,
     }
     result["rows"] = replace_by_date(result.get("rows") or [], execution_date, row)
     result["trades"] = replace_trades_by_date(result.get("trades") or [], execution_date, trades)
+    result = with_current_fund_performance_first(result, row)
     return result, row, trades
 
 
-def position_value(position, open_prices, execution_date):
+def with_current_fund_performance_first(report, row):
+    result = {"current_fund_performance": build_current_fund_performance(row)}
+    result.update(report)
+    return result
+
+
+def build_current_fund_performance(row):
+    return {
+        "date": row.get("date"),
+        "initial_cash": row.get("initial_cash"),
+        "total_value": row.get("total_value"),
+        "available_cash": row.get("available_cash"),
+        "positions_value": row.get("positions_value"),
+        "daily_profit": row.get("daily_profit"),
+        "cumulative_profit": row.get("cumulative_profit"),
+        "daily_return_rate": row.get("daily_return_rate"),
+        "cumulative_return_rate": row.get("cumulative_return_rate"),
+        "trade_count": row.get("trade_count"),
+        "current_position_snapshot": row.get("current_position_snapshot") or [],
+    }
+
+
+def position_value(position, price_cache, execution_date, price_field):
     if not position:
         return 0.0
-    price = get_open_price(open_prices, position["symbol"], execution_date)
+    price = get_price(price_cache, position["symbol"], execution_date, price_field)
     return int(position.get("amount") or 0) * price
 
 
-def get_open_price(cache, symbol, execution_date):
-    key = (symbol, execution_date)
+def apply_position_share_adjustments(position, previous_date, execution_date):
+    if not position:
+        return []
+    symbol = position.get("symbol")
+    factor = share_factor_between(symbol, previous_date, execution_date)
+    if factor == 1:
+        return []
+    old_amount = int(position.get("amount") or 0)
+    new_amount = int(round(old_amount * factor))
+    position["amount"] = new_amount
+    if position.get("price"):
+        position["price"] = round(float(position["price"]) / factor, 4)
+    return [
+        {
+            "symbol": symbol,
+            "from_date": previous_date,
+            "to_date": execution_date,
+            "factor": factor,
+            "amount_before": old_amount,
+            "amount_after": new_amount,
+            "events": adjustments_between(symbol, previous_date, execution_date),
+        }
+    ]
+
+
+def get_price(cache, symbol, execution_date, price_field):
+    key = (symbol, execution_date, price_field)
     if key not in cache:
-        cache[key] = fetch_tencent_daily_price(symbol, execution_date, price_field="open")
+        cache[key] = fetch_easy_tdx_daily_price(symbol, execution_date, price_field=price_field)
     return cache[key]
 
 
-def fetch_tencent_daily_price(symbol, trading_date, price_field="open"):
-    quote_code = tencent_quote_code(symbol)
-    url = TENCENT_KLINE_URL + "?" + urlencode({"param": f"{quote_code},day,{trading_date},{trading_date},1"})
-    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+def fetch_easy_tdx_daily_price(symbol, trading_date, price_field="open", adjust=DAILY_KLINE_ADJUST):
+    if price_field not in {"open", "close"}:
+        raise SimTradeError(f"unsupported daily price field: {price_field}")
+    market, code = easy_tdx_market_code(symbol)
     try:
-        with urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        raise SimTradeError(f"{symbol} Tencent daily price request failed for {trading_date}: {exc}") from exc
-    rows = nested_get(payload, "data", quote_code, "day") or []
-    index = {"open": 1, "close": 2}[price_field]
-    for row in rows:
-        if len(row) > index and row[0] == trading_date:
-            return float(row[index])
-    raise SimTradeError(f"{symbol} missing Tencent {price_field} for {trading_date}")
+        from easy_tdx.cli.conn import get_mac_client
+        from easy_tdx.cli.parsers import parse_adjust, parse_market, parse_period
+    except ImportError as exc:
+        raise SimTradeError("missing easy-tdx dependency: run `python3 -m pip install easy-tdx`") from exc
+
+    try:
+        with get_mac_client() as client:
+            frame = client.get_stock_kline(
+                parse_market(market),
+                code,
+                period=parse_period("DAILY"),
+                start=0,
+                count=DAILY_KLINE_LOOKBACK_COUNT,
+                adjust=parse_adjust(adjust),
+            )
+    except Exception as exc:
+        raise SimTradeError(f"{symbol} easy-tdx {adjust} daily price request failed for {trading_date}: {exc}") from exc
+
+    for row in frame.to_dict("records"):
+        if normalize_easy_tdx_date(row.get("datetime")) == trading_date:
+            return float(row[price_field])
+    raise SimTradeError(f"{symbol} missing easy-tdx {adjust} daily {price_field} for {trading_date}")
 
 
-def tencent_quote_code(symbol):
+def easy_tdx_market_code(symbol):
     code = str(symbol)
     if code.startswith(("5", "6", "9")):
-        return "sh" + code
+        return "SH", code
     if code.startswith(("4", "8")):
-        return "bj" + code
-    return "sz" + code
+        return "BJ", code
+    return "SZ", code
+
+
+def normalize_easy_tdx_date(value):
+    text = str(value)
+    if "T" in text:
+        return text.split("T", 1)[0]
+    return text[:10]
 
 
 def nested_get(data, *keys):

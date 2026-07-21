@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 import sys
+from types import ModuleType
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -29,7 +30,7 @@ class NormalizeMTFFutureArchiveTests(unittest.TestCase):
             ],
         }
 
-        with patch.object(normalizer, "fetch_tencent_close", return_value=1.521):
+        with patch.object(normalizer, "fetch_actual_close", return_value=1.521):
             with patch.object(
                 normalizer,
                 "future_trading_dates",
@@ -39,7 +40,17 @@ class NormalizeMTFFutureArchiveTests(unittest.TestCase):
 
         item = result["items"][0]
         self.assertEqual("close_price_only", result["price_basis"])
-        self.assertEqual({"date": "2026-06-12", "close": 1.521, "source": "a_stock_data_tencent_kline", "note": "actual close on base_close.date"}, item["base_close"])
+        self.assertEqual(
+            {
+                "date": "2026-06-12",
+                "close": 1.521,
+                "source": "easy_tdx_qfq_daily_kline",
+                "adjust": "QFQ",
+                "note": "actual close on base_close.date",
+            },
+            item["base_close"],
+        )
+        self.assertEqual("QFQ", result["actual_daily_kline_adjust"])
         self.assertEqual([1.6432, 20.8726], item["expected_change_percent_path"])
         self.assertEqual(
             {
@@ -191,6 +202,135 @@ class NormalizeMTFFutureArchiveTests(unittest.TestCase):
         self.assertFalse(control["add_allowed"])
         self.assertFalse(control["clear_if_held"])
 
+    def test_qfq_actual_close_does_not_apply_split_factor_again(self):
+        result = normalizer.calculate_path_point_deviation(
+            1.232,
+            "easy_tdx_qfq_daily_kline",
+            {
+                "base_date": "2026-06-12",
+                "target_date": "2026-07-07",
+                "base_close": 0.889,
+                "expected_change_percent": 34.7701,
+            },
+            symbol="588170",
+        )
+
+        self.assertEqual(38.5827, result["actual_change_percent"])
+        self.assertEqual(3.8126, result["deviation_percentage_points"])
+        self.assertNotIn("actual_close_comparable", result)
+        self.assertNotIn("corporate_action_adjustment_factor", result)
+
+    def test_adjusts_raw_expected_change_percent_to_qfq_split_basis(self):
+        archive = {
+            "report_date": "2026-07-15",
+            "items": [
+                {
+                    "symbol": "588170",
+                    "raw_response": {
+                        "data": {
+                            "change_base_date": "2026-06-12",
+                            "change_base_value": 2.6935,
+                            "future_dates": ["2026-07-15"],
+                            "predicted_change_percent": [-55.8365],
+                        }
+                    },
+                    "close_observation": {
+                        "date": "2026-07-15",
+                        "close": 1.122,
+                        "source": "easy_tdx_qfq_daily_kline",
+                    },
+                }
+            ],
+        }
+
+        with patch.object(normalizer, "fetch_actual_close", return_value=0.889):
+            result = normalizer.normalize_archive(archive, fetch_path_actuals=False)
+
+        item = result["items"][0]
+        control = item["same_day_deviation_control"]
+        self.assertEqual([-55.8365], item["raw_expected_change_percent_path"])
+        self.assertEqual([3.0], item["corporate_action_expected_change_factors"])
+        self.assertEqual("qfq_comparable_base", item["expected_change_percent_basis"])
+        self.assertEqual([32.4905], item["expected_change_percent_path"])
+        self.assertEqual(1.1778, item["predicted_close_path"][0]["predicted_close"])
+        self.assertEqual(26.2092, control["actual_change_percent"])
+        self.assertEqual(32.4905, control["expected_change_percent"])
+        self.assertEqual(-6.2813, control["deviation_percentage_points"])
+        self.assertEqual("reject", control["status"])
+
+    def test_expected_change_split_factor_starts_on_effective_date(self):
+        adjusted, factors = normalizer.adjust_expected_change_path(
+            "588170",
+            "2026-06-12",
+            ["2026-07-03", "2026-07-06", "2026-07-07"],
+            [10.0, -55.0, -50.0],
+        )
+
+        self.assertEqual([1.0, 3.0, 3.0], factors)
+        self.assertEqual([10.0, 35.0, 50.0], adjusted)
+
+    def test_split_adjusted_expected_path_is_idempotent(self):
+        archive = {
+            "report_date": "2026-07-15",
+            "items": [
+                {
+                    "symbol": "588170",
+                    "base_close": {
+                        "date": "2026-06-12",
+                        "close": 0.889,
+                        "source": "easy_tdx_qfq_daily_kline",
+                        "adjust": "QFQ",
+                    },
+                    "expected_change_percent_basis": "qfq_comparable_base",
+                    "raw_expected_change_percent_path": [-55.8365],
+                    "corporate_action_expected_change_factors": [3.0],
+                    "expected_change_percent_path": [32.4905],
+                    "predicted_close_path": [
+                        {
+                            "target_date": "2026-07-15",
+                            "expected_change_percent": 32.4905,
+                        }
+                    ],
+                    "close_observation": {
+                        "date": "2026-07-15",
+                        "close": 1.122,
+                        "source": "easy_tdx_qfq_daily_kline",
+                    },
+                }
+            ],
+        }
+
+        result = normalizer.normalize_archive(
+            archive,
+            fetch_actual=False,
+            fetch_path_actuals=False,
+        )
+
+        item = result["items"][0]
+        self.assertEqual([32.4905], item["expected_change_percent_path"])
+        self.assertEqual([-55.8365], item["raw_expected_change_percent_path"])
+        self.assertEqual([3.0], item["corporate_action_expected_change_factors"])
+        self.assertEqual("qfq_comparable_base", item["expected_change_percent_basis"])
+        self.assertEqual(-6.2813, item["same_day_deviation_control"]["deviation_percentage_points"])
+
+    def test_unadjusted_actual_close_applies_split_factor_for_comparable_price(self):
+        result = normalizer.calculate_path_point_deviation(
+            1.192,
+            "a_stock_data_tencent_kline",
+            {
+                "base_date": "2026-06-12",
+                "target_date": "2026-07-06",
+                "base_close": 2.666,
+                "expected_change_percent": 30.6775,
+            },
+            symbol="588170",
+        )
+
+        self.assertEqual(34.1335, result["actual_change_percent"])
+        self.assertEqual(3.456, result["deviation_percentage_points"])
+        self.assertEqual(3.576, result["actual_close_comparable"])
+        self.assertEqual(3.0, result["corporate_action_adjustment_factor"])
+
     def test_uses_existing_normalized_shape_without_forbidden_path_date(self):
         archive = {
             "items": [
@@ -241,22 +381,78 @@ class NormalizeMTFFutureArchiveTests(unittest.TestCase):
         self.assertEqual("sh515880", normalizer.tencent_quote_code("515880"))
         self.assertEqual("sh588170", normalizer.tencent_quote_code("588170"))
 
-    def test_parses_tencent_daily_close_response(self):
-        class FakeResponse:
+    def test_parses_easy_tdx_daily_close_response_with_qfq_adjust(self):
+        class FakeFrame:
+            def to_dict(self, mode):
+                return [{"datetime": "2026-06-12T00:00:00.000", "open": 1.539, "close": 1.521}]
+
+        class FakeClient:
+            def get_stock_kline(self, market, code, period, start, count, adjust):
+                self.call = {
+                    "market": market,
+                    "code": code,
+                    "period": period,
+                    "start": start,
+                    "count": count,
+                    "adjust": adjust,
+                }
+                return FakeFrame()
+
+        class FakeContext:
+            def __init__(self):
+                self.client = FakeClient()
+
             def __enter__(self):
-                return self
+                return self.client
 
             def __exit__(self, exc_type, exc, traceback):
                 return False
 
-            def read(self):
-                return b'{"code":0,"data":{"sz159259":{"day":[["2026-06-12","1.539","1.521","1.567","1.520","2703804.000"]]}}}'
-
-        with patch.object(normalizer, "urlopen", return_value=FakeResponse()) as urlopen:
-            close = normalizer.fetch_tencent_close("159259", "2026-06-12")
+        conn_module = ModuleType("easy_tdx.cli.conn")
+        parsers_module = ModuleType("easy_tdx.cli.parsers")
+        context = FakeContext()
+        conn_module.get_mac_client = lambda: context
+        parsers_module.parse_adjust = lambda value: value
+        parsers_module.parse_market = lambda value: value
+        parsers_module.parse_period = lambda value: value
+        with patch.dict(
+            "sys.modules",
+            {
+                "easy_tdx": ModuleType("easy_tdx"),
+                "easy_tdx.cli": ModuleType("easy_tdx.cli"),
+                "easy_tdx.cli.conn": conn_module,
+                "easy_tdx.cli.parsers": parsers_module,
+            },
+        ):
+            close = normalizer.fetch_easy_tdx_close("159259", "2026-06-12")
 
         self.assertEqual(1.521, close)
-        self.assertIn("param=sz159259%2Cday%2C2026-06-12%2C2026-06-12%2C1", urlopen.call_args.args[0].full_url)
+        self.assertEqual("SZ", context.client.call["market"])
+        self.assertEqual("159259", context.client.call["code"])
+        self.assertEqual("DAILY", context.client.call["period"])
+        self.assertEqual("QFQ", context.client.call["adjust"])
+
+    def test_uses_split_adjusted_comparable_close_for_deviation(self):
+        point = {
+            "base_date": "2026-06-12",
+            "base_close": 2.666,
+            "target_date": "2026-07-06",
+            "expected_change_percent": 30.6775,
+        }
+
+        result = normalizer.calculate_path_point_deviation(
+            1.192,
+            "test",
+            point,
+            symbol="588170",
+        )
+
+        self.assertEqual(1.192, result["actual_close"])
+        self.assertEqual(3.576, result["actual_close_comparable"])
+        self.assertEqual(3.0, result["corporate_action_adjustment_factor"])
+        self.assertEqual(34.1335, result["actual_change_percent"])
+        self.assertEqual(3.456, result["deviation_percentage_points"])
+        self.assertEqual("pass", result["deviation_status"])
 
 
 if __name__ == "__main__":

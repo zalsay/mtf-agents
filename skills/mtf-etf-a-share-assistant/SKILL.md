@@ -14,6 +14,12 @@ description: "当需要作为 MTF A 股 ETF 助手处理每日 ETF 工作流、�
 - 每日工作流优先使用本 skill 的脚本生成归档、研究结论和交易计划；不要手写复杂表格或临时复刻计算公式。
 - 面向用户的 Markdown 必须自然、易读，只按收盘价口径表达，不暴露开发类术语。
 
+## 运行依赖
+
+- 正式运行每日工作流前必须确认 Python 环境已安装 `easy-tdx`。
+- 实际日 K 查询统一通过 `easy-tdx` 获取，日线复权口径必须显式使用前复权 `QFQ`。
+- 若运行环境缺少依赖，先执行 `python3 -m pip install easy-tdx`，再运行 `apply_daily_trade_plan.py` 或 `normalize_mtf_future_archive.py`。
+
 ## 日常入口
 
 常用工作目录使用当前仓库根目录。若不确定位置，先进入包含 `skills/mtf-etf-a-share-assistant/` 的目录：
@@ -30,7 +36,10 @@ cd mtf-agents
 4. 用 `render_daily_etf_outputs.py` 从归一化归档和模拟账户文件生成：
    - `YYYY-MM-DD-suggested-ETF.md`
    - `YYYY-MM-DD-trade-plan.md`
-5. 用测试和禁词扫描验证结果。
+5. 用 `gen_asset_curve_html.py` 从 `YYYY-MM-DD-sim-trade-report.json` 生成
+   可交互资产曲线图 `asset-curve.html`（含上证指数对比、100% 堆叠配置占比、
+   买卖标记、最大回撤阴影）。脚本会自动把 `echarts.min.js` 放到当日目录, 离线可渲染。
+6. 用测试和禁词扫描验证结果。
 
 示例：
 
@@ -43,6 +52,9 @@ skills/mtf-etf-a-share-assistant/scripts/normalize_mtf_future_archive.py \
 
 skills/mtf-etf-a-share-assistant/scripts/render_daily_etf_outputs.py YYYY-MM-DD \
   --write --check-terms
+
+# 生成当日可交互资产曲线图(自动放置 echarts.min.js 到当日目录)
+python3 scripts/gen_asset_curve_html.py --date YYYY-MM-DD
 
 PYTHONPATH=/tmp/mtf-exchange-calendars \
 python3 -m unittest discover -s skills/mtf-etf-a-share-assistant/scripts -p 'test_*.py'
@@ -106,11 +118,13 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-future \
 `normalize_mtf_future_archive.py` 是预测归档的唯一归一化入口：
 
 - `base_close.close` 必须使用 `base_close.date` 对齐的实际收盘价。
+- 若 `base_close.date` 到预测 `target_date` 之间发生份额拆分或折算，模型原始预计涨跌必须先换成前复权可比口径：`adjusted_expected_change_percent = ((1 + raw_expected_change_percent / 100) * share_factor - 1) * 100`。
+- 拆分调整后的预计涨跌路径必须保存原始路径、逐点拆分因子和已调整口径标记；重复归一化时不得再次调整。
 - `predicted_close_path` 必须按 `base_close.close * (1 + expected_change_percent / 100)` 重建。
 - 预测点必须使用 `target_date`，不要把基准日期、报告日期和预测目标日期混用。
 - 已到达的 `target_date` 必须填入同日实际收盘价、实际涨跌幅、偏差百分点和状态。
 - 不得直接比较实际价格与预测价格；只能比较同一基准下的实际涨跌幅和同日预计涨跌幅。
-- 不使用 Eastmoney 作为默认历史 K 线来源；默认走腾讯日 K 服务，避免频繁调用触发限制。
+- 不使用 Eastmoney 作为默认历史 K 线来源；实际日 K 查询默认走 `easy-tdx`，并显式使用前复权 `QFQ`。
 
 同日偏差公式：
 
@@ -134,14 +148,19 @@ deviation_points = actual_change_percent - expected_change_percent
 
 - 模拟交易成交价必须使用执行日实际开盘价；不得使用预测价、参考价、收盘价或盘中实时价替代。
 - 买入数量必须按 `100` 份一手向下取整；清仓卖出按当前持仓数量全部卖出。
+- 模拟账户日终权益和持仓市值必须使用执行日实际收盘价重估，不得用开盘成交价代替收盘估值。
+- 若 ETF 发生份额拆分或折算，必须先按 `split_adjustments.json` 调整持仓份额；模型预计涨跌与实际涨跌都必须转换到同一前复权基准，不能只修正实际价格，也不能把拆分后的低价当作真实暴跌。
 - 当日重复执行模拟交易时，必须替换同日期账户快照和同日期交易记录，不能重复追加。
+- `YYYY-MM-DD-sim-trade-report.json` 顶层第一个字段必须是 `current_fund_performance`，直接展示最新资金、收益和当前持仓。
 - “后续预计涨跌” = 末端预计涨跌 - 报告日同日预计涨跌。
+- 若刷新后的下一批预测路径从报告日之后开始，只能用于后续空间估算；报告日同日偏差仍必须使用包含报告日 `target_date` 的路径或标记为待确认。
 - 换仓优势 = 候选后续预计涨跌 - 当前持仓后续预计涨跌。
 - 当前持仓后续预计涨跌低于 `-1%` 时，优先清仓或目标仓位归零。
 - 当前持仓未转弱时，只有候选换仓优势至少 `8` 个百分点才允许一次性清仓切换。
 - 当前持仓已低于退出线时，候选后续预计涨跌为正且换仓优势至少 `5` 个百分点，可清仓后买入候选。
 - 预测窗口到期导致的后续空间自然归零，不是独立清仓/换仓信号；必须下一个交易日早上刷新后再重算。
 - 计划生成前必须读取最新模拟账户文件，确认当前持仓、现金、总权益、仓位和清仓后可承接额度。
+- 交易计划标题日期必须使用下一交易日，不得用下一自然日替代。
 - 每个标的必须落到明确动作：买入、加仓、持有、减仓、清仓、不执行。
 
 ## 用户版输出
@@ -184,6 +203,8 @@ reports/mtf-etf/YYYY-MM-DD/
 - `YYYY-MM-DD-sim-trade-report.json`
 - `YYYY-MM-DD-suggested-ETF.md`
 - `YYYY-MM-DD-trade-plan.md`
+- `YYYY-MM-DD-asset-curve.html`（可交互资产曲线图）
+- `echarts.min.js`（随图放置, 离线渲染依赖）
 
 正式归档不要保留整段原始返回；如需排障，放到 `/tmp` 或单独内部文件，不进入用户版报告。
 
@@ -205,4 +226,5 @@ python3 /Users/yingzhang/.codex/skills/.system/skill-creator/scripts/quick_valid
 ```bash
 python3 -m pip install --target /tmp/skill-validate-pyyaml pyyaml
 python3 -m pip install --target /tmp/mtf-exchange-calendars exchange-calendars
+python3 -m pip install easy-tdx
 ```
