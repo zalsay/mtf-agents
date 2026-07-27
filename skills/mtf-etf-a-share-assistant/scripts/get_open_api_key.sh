@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-base_url="${MTF_API_BASE_URL:-https://go-api.meetlife.com.cn:9001}"
+base_url="${MTF_API_BASE_URL:-https://go-api.meetlife.com.cn/mtf-service}"
 temp_token="${MTF_API_TEMP_TOKEN:-}"
 username="${MTF_API_USERNAME:-}"
 password="${MTF_API_PASSWORD:-}"
@@ -16,7 +16,7 @@ Usage:
   get_open_api_key.sh [--base-url URL] [--username USER] [--password PASS] [--name KEY_NAME] [--env-file PATH] [--no-write-env]
 
 Environment:
-  MTF_API_BASE_URL   Default: https://go-api.meetlife.com.cn:9001
+  MTF_API_BASE_URL   Default: https://go-api.meetlife.com.cn/mtf-service
   MTF_API_TEMP_TOKEN One-time token generated in FinTrack settings, valid for 5 minutes
   MTF_API_USERNAME   Legacy fallback: FinTrack username
   MTF_API_PASSWORD   Legacy fallback: FinTrack password

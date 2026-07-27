@@ -3,14 +3,15 @@
 
 该脚本供每日自动化工作流第 1 步调用: 自动从 Open API 拉取
 - etf-hot 热门 ETF 雷达, 持久化为本地快照 YYYY-MM-DD-etf-hot.json (候选"发现源")
-- watchlist 候选与每只标的的 mtf-future 预测 (含异步 job 轮询)
+- watchlist 候选与每只标的指定日期的 mtf-future 缓存查询
 用 easy-tdx(QFQ) 回填当日实际收盘, 组装成
 normalize_mtf_future_archive.py 能吃掉的归档 JSON。
 
 关键约束:
 - close_observation.source 必须为 'easy_tdx_qfq_daily_kline' (前复权口径),
   与 easy-tdx 拉取的路径点一致, 避免 split_adjustments.json 的份额拆分因子被重复计算。
-- ETF 预测只用 mtf-pro; 若 mtf-future 返回 job, 用 mtf-job 轮询至 succeeded 后重拉。
+- ETF 预测只用 mtf-pro; mtf-future 只读取指定日期的已有缓存。
+  缓存未命中时显式调用 mtf-predict-once --prefer-cache，完成后再按日期回查。
 
 用法:
     python3 scripts/build_daily_archive.py [--date YYYY-MM-DD] [--dry-run]
@@ -33,12 +34,18 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "skills/mtf-etf-a-share-assistant/scripts"
 ENV = SCRIPTS / ".env.open-api"
 INDEX_SYMBOL = "000001"
-INDEX_KEY = "idx000001_best_hlen_7_clen_2048_v_2.5_mtf-pro"
+INDEX_KEY = "000001_best_hlen_7_clen_2048_v_2.5_mtf-pro"
 CRASH_THRESHOLD = -3.0
 # ETF 代码特征: 沪市 5xxxxx / 深市 1xxxxx
 ETF_RE = re.compile(r"^(5|1)\d{5}$")
 # 规整 symbol -> 名称 (来自 watchlist 的 company_name)
 NAME_MAP = {}
+
+
+class OpenAPIError(RuntimeError):
+    def __init__(self, message, body=None):
+        super().__init__(message)
+        self.body = body if isinstance(body, dict) else {}
 
 
 def call_api(sub, *args):
@@ -48,8 +55,60 @@ def call_api(sub, *args):
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
     if r.returncode != 0 or not r.stdout.strip():
-        raise RuntimeError(f"call_open_api {sub} 失败 rc={r.returncode}: {r.stderr[:500]}")
-    return json.loads(r.stdout)
+        body = {}
+        if r.stdout.strip():
+            try:
+                body = json.loads(r.stdout)
+            except json.JSONDecodeError:
+                pass
+        detail = r.stderr.strip() or json.dumps(body, ensure_ascii=False)
+        raise OpenAPIError(
+            f"call_open_api {sub} 失败 rc={r.returncode}: {detail[:500]}",
+            body,
+        )
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        raise OpenAPIError(f"call_open_api {sub} 返回非法 JSON: {exc}") from exc
+
+
+def response_data(response):
+    data = response.get("data") if isinstance(response, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
+def is_prediction_cache_miss(error):
+    if not isinstance(error, OpenAPIError):
+        return False
+    error_body = error.body.get("error")
+    if isinstance(error_body, dict) and error_body.get("code") == "prediction_cache_not_found":
+        return True
+    return "prediction_cache_not_found" in json.dumps(error.body, ensure_ascii=False)
+
+
+def prediction_config_from_key(unique_key):
+    horizon_match = re.search(r"_hlen_(\d+)_", unique_key)
+    context_match = re.search(r"_clen_(\d+)_", unique_key)
+    if not horizon_match or not context_match:
+        raise RuntimeError(f"无法从 unique_key 解析预测配置: {unique_key}")
+    prediction_type = "mtf-pro" if unique_key.endswith("_mtf-pro") else "mtf-lite"
+    return int(horizon_match.group(1)), int(context_match.group(1)), prediction_type
+
+
+def wait_for_prediction_job(response):
+    data = response_data(response)
+    job_id = data.get("job_id") or response.get("job_id")
+    if not job_id:
+        return data
+    for _ in range(40):  # 最多等约 10 分钟
+        job = response_data(call_api("mtf-job", "--job-id", str(job_id)))
+        status = str(job.get("status", "")).strip().lower()
+        if status in {"succeeded", "success", "completed", "done"} or job.get("success") is True:
+            return job
+        if status in {"failed", "error", "cancelled", "canceled"}:
+            raise RuntimeError(f"预测 job {job_id} 失败: {job.get('error') or status}")
+        time.sleep(15)
+    raise RuntimeError(f"预测 job {job_id} 轮询超时")
 
 
 def get_candidates():
@@ -115,7 +174,7 @@ def fetch_and_save_etf_hot(report_date, out_dir, dry_run=False):
 
 
 def build_index_risk(report_date):
-    resp = fetch_mtf_future(INDEX_KEY)
+    resp = fetch_mtf_future(INDEX_KEY, report_date, INDEX_SYMBOL, stock_type=3)
     fdates = resp.get("future_dates") or []
     pct = resp.get("predicted_change_percent") or []
     target = report_date if report_date in fdates else (fdates[-1] if fdates else report_date)
@@ -123,7 +182,7 @@ def build_index_risk(report_date):
     triggered = expected <= CRASH_THRESHOLD
     return {
         "name": "上证指数",
-        "symbol": "idx000001",
+        "symbol": INDEX_SYMBOL,
         "target_date": target,
         "expected_change_percent": round(expected, 4),
         "crash_threshold_percent": CRASH_THRESHOLD,
@@ -135,20 +194,31 @@ def build_index_risk(report_date):
     }
 
 
-def fetch_mtf_future(key):
-    d = call_api("mtf-future", "--unique-key", key)
-    data = (d.get("data") or {})
-    job_id = data.get("job_id")
-    if job_id and not data.get("success"):
-        for _ in range(40):  # 最多等 ~10 分钟
-            j = call_api("mtf-job", "--job-id", job_id).get("data") or {}
-            if j.get("status") == "succeeded" or j.get("success"):
-                break
-            time.sleep(15)
-        else:
-            raise RuntimeError(f"mtf-future job {job_id} 轮询超时")
-        d = call_api("mtf-future", "--unique-key", key)
-        data = (d.get("data") or {})
+def fetch_mtf_future(key, predict_date, stock_code, stock_type):
+    query_args = ("--unique-key", key, "--predict-date", predict_date)
+    try:
+        d = call_api("mtf-future", *query_args)
+    except OpenAPIError as exc:
+        if not is_prediction_cache_miss(exc):
+            raise
+        horizon_len, context_len, prediction_type = prediction_config_from_key(key)
+        print(
+            f"[cache-miss] {key} {predict_date}; 显式触发 mtf-predict-once "
+            f"(horizon={horizon_len}, context={context_len}, type={prediction_type})"
+        )
+        trigger = call_api(
+            "mtf-predict-once",
+            "--stock-code", stock_code,
+            "--stock-type", str(stock_type),
+            "--prediction-type", prediction_type,
+            "--horizon-len", str(horizon_len),
+            "--context-len", str(context_len),
+            "--predict-date", predict_date,
+            "--prefer-cache",
+        )
+        wait_for_prediction_job(trigger)
+        d = call_api("mtf-future", *query_args)
+    data = response_data(d)
     if not data.get("predicted_change_percent") and not data.get("future_dates"):
         raise RuntimeError(f"{key} 未返回有效预测")
     return data
@@ -211,7 +281,7 @@ def build(report_date, dry_run=False):
     items = []
     for sym, key in cands.items():
         try:
-            resp = fetch_mtf_future(key)
+            resp = fetch_mtf_future(key, report_date, sym, stock_type=2)
             name = (get_watchlist_name(sym) or resp.get("short_name")
                     or resp.get("name") or sym)
             actual, actual_date = fetch_close_best_effort(sym, report_date)
@@ -239,7 +309,7 @@ def build(report_date, dry_run=False):
     except Exception as e:
         print(f"[warn] 上证指数风控获取失败: {e}")
         index_risk = {
-            "name": "上证指数", "symbol": "idx000001", "target_date": report_date,
+            "name": "上证指数", "symbol": INDEX_SYMBOL, "target_date": report_date,
             "expected_change_percent": None, "crash_threshold_percent": CRASH_THRESHOLD,
             "triggered": False, "buy_blocked": False, "status": "unknown",
             "note": "上证指数同日预测获取失败，风控状态未知",

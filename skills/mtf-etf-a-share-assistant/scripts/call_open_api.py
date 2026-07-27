@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-DEFAULT_BASE_URL = "https://go-api.meetlife.com.cn:9001"
+DEFAULT_BASE_URL = "https://go-api.meetlife.com.cn/mtf-service"
 DEFAULT_ENV_FILE = ".env.open-api"
 
 
@@ -100,9 +100,11 @@ def build_parser():
 
     future = sub.add_parser("mtf-future")
     future.add_argument("--unique-key", required=True)
+    future.add_argument("--predict-date", help="Only query the cached future chunk containing YYYY-MM-DD")
 
     predict_once = sub.add_parser("mtf-predict-once")
     add_predict_args(predict_once)
+    predict_once.add_argument("--predict-date", help="Treat YYYY-MM-DD as the prediction date")
     predict_once.add_argument("--prefer-cache", action="store_true")
 
     predict_best = sub.add_parser("mtf-predict-best")
@@ -142,7 +144,7 @@ def add_predict_args(parser):
     parser.add_argument("--stock-type", type=int, default=2)
     parser.add_argument("--prediction-type", choices=["mtf-lite", "mtf-pro"], default="mtf-lite")
     parser.add_argument("--horizon-len", type=int, default=7)
-    parser.add_argument("--context-len", type=int, default=256)
+    parser.add_argument("--context-len", type=int, default=512)
 
 
 def command_to_request(args):
@@ -167,7 +169,10 @@ def command_to_request(args):
             "context_len": args.context_len,
         }, None
     if args.command == "mtf-future":
-        return "GET", "/api/open/v1/mtf/future", {"unique_key": args.unique_key}, None
+        return "GET", "/api/open/v1/mtf/future", {
+            "unique_key": args.unique_key,
+            "predict_date": args.predict_date,
+        }, None
     if args.command in ("mtf-predict-once", "mtf-predict-best"):
         payload = {
             "stock_code": args.stock_code,
@@ -177,6 +182,9 @@ def command_to_request(args):
             "context_len": args.context_len,
         }
         if args.command == "mtf-predict-once":
+            predict_date = getattr(args, "predict_date", None)
+            if predict_date is not None:
+                payload["predict_date"] = predict_date
             payload["prefer_cache"] = args.prefer_cache
             return "POST", "/api/open/v1/mtf/predict-once", None, payload
         payload["years"] = args.years

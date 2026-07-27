@@ -30,7 +30,7 @@ cd mtf-agents
 
 每日 ETF 工作流的脚本优先顺序：
 
-1. 用 `scripts/build_daily_archive.py --date YYYY-MM-DD` 一键构建当日 `YYYY-MM-DD-mtf-future.json`（内部先落盘 `YYYY-MM-DD-etf-hot.json` 热门 ETF 雷达快照作为候选"发现源"，再完成 watchlist 候选筛选、mtf-future 拉取+异步 job 轮询、easy-tdx(QFQ) 当日收盘回填；`close_observation.source` 固定为 `easy_tdx_qfq_daily_kline` 避免拆分因子双计；单只预测/行情失败自动跳过继续）。
+1. 用 `scripts/build_daily_archive.py --date YYYY-MM-DD` 一键构建当日 `YYYY-MM-DD-mtf-future.json`（内部先落盘 `YYYY-MM-DD-etf-hot.json` 热门 ETF 雷达快照作为候选"发现源"，再完成 watchlist 候选筛选、按归档日期读取已有 mtf-future 缓存；缓存缺失时显式调用 `mtf-predict-once --predict-date YYYY-MM-DD --prefer-cache` 后再回查；最后用 easy-tdx(QFQ) 回填当日收盘；`close_observation.source` 固定为 `easy_tdx_qfq_daily_kline` 避免拆分因子双计；单只预测/行情失败自动跳过继续）。
 2. 用 `apply_daily_trade_plan.py` 按上一交易日计划生成当日模拟账户文件。
 3. 用 `normalize_mtf_future_archive.py` 归一化 `YYYY-MM-DD-mtf-future.json`。
 4. 用 `render_daily_etf_outputs.py` 从归一化归档和模拟账户文件生成：
@@ -68,7 +68,7 @@ python3 -m unittest discover -s skills/mtf-etf-a-share-assistant/scripts -p 'tes
 生产 Open API base URL：
 
 ```text
-https://go-api.meetlife.com.cn:9001
+https://go-api.meetlife.com.cn/mtf-service
 ```
 
 优先使用脚本调用，不直接手写请求：
@@ -78,8 +78,12 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-hot
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-quotes 510300 159919
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py watchlist
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-best-by-config --symbol 515880 --stock-type 2
-skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-future --unique-key 515880_best_hlen_7_clen_2048_v_2.5_mtf-pro
-skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --stock-code 515880 --stock-type 2 --prediction-type mtf-pro --horizon-len 7 --context-len 2048 --prefer-cache
+skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-future \
+  --unique-key 515880_best_hlen_7_clen_2048_v_2.5_mtf-pro \
+  --predict-date YYYY-MM-DD
+skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once \
+  --stock-code 515880 --stock-type 2 --prediction-type mtf-pro \
+  --horizon-len 7 --context-len 2048 --predict-date YYYY-MM-DD --prefer-cache
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-job --job-id <job_id>
 ```
 
@@ -97,9 +101,10 @@ API key 默认从 `.env.open-api` 读取。若文件不在仓库根目录，调�
 
 - ETF/基金统一按 `stock_type=2`。
 - 交易筛选只使用 `prediction_type=mtf-pro`，不使用 lite 兜底。
-- 候选缺少可用 future 时，必须逐只查询；若返回异步 `job_id`，必须轮询到成功或明确失败，不得直接写“未刷新”。
+- 候选缺少可用 future 时，必须逐只按目标日期查询；`mtf-future` 只读已有缓存，cache miss 不会自动推理。
+- cache miss 后必须显式调用 `mtf-predict-once --predict-date YYYY-MM-DD --prefer-cache`，若返回异步 `job_id` 则轮询到成功或明确失败，再用相同日期回查；不得让 cached 查询承担补算职责。
 - 若缺少 best key，按顺序补齐：`predict-best -> best-by-config -> future`。
-- 若已有 pro key 但 future 需要补算，用 `mtf-predict-once --prefer-cache`。
+- 若已有 pro key 但指定日期的 future 缺失，用 `mtf-predict-once --predict-date YYYY-MM-DD --prefer-cache`。
 - 热门 ETF 或用户明确给出的 ETF 不在关注清单时，可按需加入关注清单后继续，不要因当前关注清单较窄而停止。
 
 ### 上证指数风控
@@ -108,10 +113,11 @@ API key 默认从 `.env.open-api` 读取。若文件不在仓库根目录，调�
 
 ```bash
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-future \
-  --unique-key idx000001_best_hlen_7_clen_2048_v_2.5_mtf-pro
+  --unique-key 000001_best_hlen_7_clen_2048_v_2.5_mtf-pro \
+  --predict-date YYYY-MM-DD
 ```
 
-- 上证指数 key 必须保留 `idx` 前缀。
+- 上证指数按 `stock_code=000001`、`stock_type=3` 处理；best key 使用实际落库的 `000001_best_...` 形式，不添加 `idx` 前缀。
 - 按报告日或计划执行日查找同日预计涨跌。
 - 同日预计涨跌 `<= -3%` 时，大盘风控触发：当前持仓目标仓位降为 0，不新增买入或换仓承接。
 - 若无法确认大盘风控，不允许新增买入或换仓，只能持有、减仓、清仓或不执行。

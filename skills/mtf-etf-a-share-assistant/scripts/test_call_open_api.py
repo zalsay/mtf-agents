@@ -17,7 +17,8 @@ class CallOpenApiTests(unittest.TestCase):
             stock_type=2,
             prediction_type="mtf-lite",
             horizon_len=7,
-            context_len=256,
+            context_len=512,
+            predict_date="2026-07-28",
             prefer_cache=True,
         )
 
@@ -27,7 +28,38 @@ class CallOpenApiTests(unittest.TestCase):
         self.assertEqual("/api/open/v1/mtf/predict-once", path)
         self.assertIsNone(params)
         self.assertTrue(payload["prefer_cache"])
+        self.assertEqual("2026-07-28", payload["predict_date"])
         self.assertNotIn("best_max_age_days", payload)
+
+    def test_future_query_targets_requested_cached_date(self):
+        args = argparse.Namespace(
+            command="mtf-future",
+            unique_key="515880_best_hlen_7_clen_2048_v_2.5_mtf-pro",
+            predict_date="2026-07-28",
+        )
+
+        method, path, params, payload = call_open_api.command_to_request(args)
+
+        self.assertEqual("GET", method)
+        self.assertEqual("/api/open/v1/mtf/future", path)
+        self.assertEqual(
+            {
+                "unique_key": "515880_best_hlen_7_clen_2048_v_2.5_mtf-pro",
+                "predict_date": "2026-07-28",
+            },
+            params,
+        )
+        self.assertIsNone(payload)
+
+    def test_predict_commands_default_to_context_len_512(self):
+        parser = call_open_api.build_parser()
+
+        args = parser.parse_args([
+            "mtf-predict-once",
+            "--stock-code", "510300",
+        ])
+
+        self.assertEqual(512, args.context_len)
 
     def test_strategy_save_posts_json_body(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -97,7 +129,7 @@ class CallOpenApiTests(unittest.TestCase):
 
         with patch.object(call_open_api, "urlopen", fake_urlopen):
             status, body = call_open_api.request_json(
-                "https://go-api.meetlife.com.cn:9001",
+                "https://go-api.meetlife.com.cn/mtf-service",
                 "ftk_test",
                 "POST",
                 "/api/open/v1/etf/quotes",
@@ -110,7 +142,7 @@ class CallOpenApiTests(unittest.TestCase):
 
         self.assertEqual(200, status)
         self.assertEqual({"status": "ok", "data": {}}, body)
-        self.assertEqual("https://go-api.meetlife.com.cn:9001/api/open/v1/etf/quotes", captured["url"])
+        self.assertEqual("https://go-api.meetlife.com.cn/mtf-service/api/open/v1/etf/quotes", captured["url"])
         self.assertEqual("Bearer ftk_test", captured["headers"]["Authorization"])
         self.assertEqual("zalsay", captured["headers"]["X-fintrack-user"])
         self.assertEqual("req-test", captured["headers"]["X-request-id"])

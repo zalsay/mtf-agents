@@ -35,7 +35,7 @@ MTF agent 是 A 股/ETF 研究和工具执行助手，只提供研究支持与�
 外部 agent、skill 和服务间调用统一走 Open API：
 
 ```text
-https://go-api.meetlife.com.cn:9001/api/open/v1
+https://go-api.meetlife.com.cn/mtf-service/api/open/v1
 ```
 
 本地或非生产环境可通过 `MTF_API_BASE_URL` 覆盖 base URL。默认鉴权：
@@ -90,14 +90,14 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once --sto
    - `GET /api/open/v1/watchlist`：确认当前 API key 用户关注清单；MTF 读取类接口只允许访问关注清单内标的。
    - `GET /api/open/v1/mtf/best?stock_type=2&include_validation=true`：查询可访问 best 结果；如服务端返回验证信息则一并带出。
    - `GET /api/open/v1/mtf/best/by-config`：默认只传 `symbol` 和 `stock_type`，聚合查询该标的所有可用配置 key；也可单独传 `horizon_len` 或 `context_len` 做过滤，两个都传时查询更精确的单配置/配置子集。
-   - `GET /api/open/v1/mtf/future?unique_key=...`：查询未来预测序列。
+   - `GET /api/open/v1/mtf/future?unique_key=...&predict_date=YYYY-MM-DD`：只查询已有 future 缓存中包含指定日期的预测 chunk；不传日期时才使用服务端上海时区当天日期。
    - 若 `mtf-future` 返回 `predicted_change_percent` 数组和 `change_base_value`，应把每个预测涨跌幅点换算为对应价格序列：`price_i = change_base_value * (1 + predicted_change_percent_i / 100)`。
    - 在价格序列可换算时，区间最低对应价格作为参考买入价，区间最高对应价格作为参考卖出价；若只有单个预测值或缺少 `change_base_value`，则只能输出周期末参考价，不能声称已得到区间最低/最高价。
 
 5. **触发预测**
    - ETF 交易筛选只使用 `prediction_type=mtf-pro`，不使用 `mtf-lite` 兜底。
    - 若 `mtf-best-by-config` 没有 pro unique key，先用 `POST /api/open/v1/mtf/predict-best` 训练 best，再重新查询 pro key。
-   - 已有 pro key 后，如 future 需要补算，可用 `POST /api/open/v1/mtf/predict-once` 并设置 `prefer_cache=true`。
+   - 已有 pro key 后，如指定日期的 future 缺失，可用 `POST /api/open/v1/mtf/predict-once`，传入 `predict_date` 并设置 `prefer_cache=true`；future cache miss 本身不会触发推理。
    - 触发计算前必须说明是否已有缓存、是否需要新计算、可能耗时和权限约束；创建 job 后读取 `estimated_inference_time_sec`，等待预计时间后再查询 job 状态。
 
 6. **回测与策略**
