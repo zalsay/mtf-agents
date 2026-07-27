@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """构建当日 MTF future 归档 (reports/mtf-etf/YYYY-MM-DD/YYYY-MM-DD-mtf-future.json)。
 
-该脚本供每日自动化工作流第 1 步调用: 自动从 Open API 拉取 watchlist 与每只标的的
-mtf-future 预测 (含异步 job 轮询), 用 easy-tdx(QFQ) 回填当日实际收盘, 组装成
+该脚本供每日自动化工作流第 1 步调用: 自动从 Open API 拉取
+- etf-hot 热门 ETF 雷达, 持久化为本地快照 YYYY-MM-DD-etf-hot.json (候选"发现源")
+- watchlist 候选与每只标的的 mtf-future 预测 (含异步 job 轮询)
+用 easy-tdx(QFQ) 回填当日实际收盘, 组装成
 normalize_mtf_future_archive.py 能吃掉的归档 JSON。
 
 关键约束:
@@ -78,6 +80,38 @@ def get_candidates():
 
 def get_watchlist_name(sym):
     return NAME_MAP.get(sym, "")
+
+
+def fetch_and_save_etf_hot(report_date, out_dir, dry_run=False):
+    """拉取 etf-hot 热门 ETF 雷达并持久化为本地 JSON 快照 (best-effort, 非致命)。
+
+    这是候选"发现源"的本地落盘：etf-hot 只给热门雷达元数据（不给 MTF 预测），
+    MTF 预测按权限只能在 watchlist 内拉取。上游偶发不可用时不影响主归档，仅记录错误。
+    返回写出路径；失败时返回 None。
+    """
+    try:
+        raw = call_api("etf-hot")
+    except Exception as e:
+        print(f"[etf-hot][warn] 拉取失败, 跳过快照: {e}")
+        return None
+    envelope_err = (raw.get("status") == "error") or bool(raw.get("error"))
+    payload = {
+        "report_date": report_date,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "source": "GET /api/open/v1/etf/hot",
+        "ok": not envelope_err,
+        "data": (raw.get("data") or {}),
+        "error": raw.get("error") if envelope_err else None,
+        "raw_response": raw,
+    }
+    out_path = out_dir / f"{report_date}-etf-hot.json"
+    if dry_run:
+        print(f"[dry-run] 将写入 {out_path} (etf-hot 快照, ok={not envelope_err})")
+        return out_path
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    hot = (raw.get("data") or {})
+    print(f"[etf-hot] 已保存 {out_path} (ok={not envelope_err}, data keys={list(hot.keys())})")
+    return out_path
 
 
 def build_index_risk(report_date):
@@ -160,6 +194,17 @@ def _back_days(date_text, n):
 
 
 def build(report_date, dry_run=False):
+    out_dir = ROOT / "reports" / "mtf-etf" / report_date
+    if not dry_run:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1) 候选"发现源"快照: etf-hot 热门 ETF 雷达落盘 (best-effort, 失败不影响主归档)
+    try:
+        fetch_and_save_etf_hot(report_date, out_dir, dry_run=dry_run)
+    except Exception as e:
+        print(f"[warn] etf-hot 快照写入失败 (不影响 mtf-future 主归档): {e}")
+
+    # 2) 操作边界: watchlist 候选 -> mtf-future 预测归档
     cands = get_candidates()
     print(f"[build] {report_date}: {len(cands)} 个 ETF 候选")
 
@@ -208,13 +253,11 @@ def build(report_date, dry_run=False):
         "market_index_risk": index_risk,
         "items": items,
     }
-    out_dir = ROOT / "reports" / "mtf-etf" / report_date
     out_path = out_dir / f"{report_date}-mtf-future.json"
     if dry_run:
         print(f"[dry-run] 将写入 {out_path} ({len(items)} ETF items)")
         print(json.dumps(archive, ensure_ascii=False, indent=2)[:800])
         return
-    out_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(archive, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"\nWROTE {out_path} with {len(items)} ETF items; index triggered={index_risk.get('triggered') if index_risk else None}")
 
