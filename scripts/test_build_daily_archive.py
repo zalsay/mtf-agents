@@ -75,6 +75,46 @@ class BuildDailyArchiveTests(unittest.TestCase):
         self.assertTrue(all("--predict-date" in args for args in future_args))
         self.assertTrue(all("2026-07-24" in args for args in future_args))
 
+    def test_best_miss_trains_polls_job_then_queries_future(self):
+        calls = []
+        future_calls = 0
+        job_calls = 0
+
+        def fake_call_api(command, *args):
+            nonlocal future_calls, job_calls
+            calls.append((command, args))
+            if command == "mtf-v2-future":
+                future_calls += 1
+                if future_calls == 1:
+                    raise build_daily_archive.OpenAPIError(
+                        "best missing",
+                        {"error": {"code": "not_found"}},
+                    )
+                return {"data": {"future_dates": ["2026-07-24"]}}
+            if command == "mtf-v2-train":
+                return {"data": {"job_id": "job-train-1", "status": "queued"}}
+            if command == "mtf-v2-job":
+                job_calls += 1
+                status = ["queued", "running", "succeeded"][job_calls - 1]
+                return {"data": {"job_id": "job-train-1", "status": status}}
+            raise AssertionError(command)
+
+        with mock.patch.object(build_daily_archive, "call_api", side_effect=fake_call_api), \
+                mock.patch.object(build_daily_archive.time, "sleep"):
+            result = build_daily_archive.fetch_mtf_future(
+                "2026-07-24",
+                "588170",
+                stock_type=2,
+                horizon_len=8,
+                context_len=2048,
+                allow_predict=True,
+            )
+
+        self.assertEqual(["2026-07-24"], result["future_dates"])
+        self.assertEqual(1, len([item for item in calls if item[0] == "mtf-v2-train"]))
+        self.assertEqual(3, job_calls)
+        self.assertNotIn("mtf-v2-predict-once", [command for command, _ in calls])
+
 
 if __name__ == "__main__":
     unittest.main()

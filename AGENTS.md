@@ -103,7 +103,7 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-predict-once --
 5. **触发预测**
    - ETF 交易筛选只使用 `prediction_type=mtf-pro`，不使用 `mtf-lite` 兜底。
    - 若 v2 没有 pro best key，不能切换到 lite；需要单独、明确授权后调用 v1 训练接口。
-   - `mtf-v2-future` 接口本身只返回已有缓存；每日 workflow 遇到指定日期 future 缺失时，使用同一个 `predict_date` 调用 `POST /api/open/v2/mtf/predict-once`，设置 `prefer_cache=true`，再用同一个日期轮询 `mtf-v2-future`，直到该日期出现在 `future_dates` window 内。诊断场景可使用 workflow 的 `--cache-only`；补算完成以目标日期的 future 命中为准，不查询任务状态接口。
+   - `mtf-v2-future` 接口本身只返回已有缓存；best 缺失时先用相同的 horizon/context 调用 `POST /api/open/v2/mtf/train`，通过 `GET /api/open/v2/mtf/jobs/{job_id}` 轮询至成功，再重新查询 best。best 成功后若指定日期 future 缺失，使用同一个 `predict_date` 调用 `POST /api/open/v2/mtf/predict-once`，设置 `prefer_cache=true`，再用同一个日期轮询 `mtf-v2-future`，直到该日期出现在 `future_dates` window 内。诊断场景可使用 workflow 的 `--cache-only`；完成信号以目标日期的 future 命中为准。
    - `predict_date` 始终表示目标 future 日期；gateway/Python 负责使用目标日前的历史数据生成该 chunk。
 
 6. **回测与策略**

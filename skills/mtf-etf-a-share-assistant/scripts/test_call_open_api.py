@@ -133,6 +133,38 @@ class CallOpenApiTests(unittest.TestCase):
         self.assertEqual(1024, payload["context_len"])
         self.assertTrue(payload["prefer_cache"])
 
+    def test_v2_train_uses_v2_endpoint_and_training_dimensions(self):
+        parser = call_open_api.build_parser()
+        args = parser.parse_args([
+            "mtf-v2-train",
+            "--stock-code", "510300",
+            "--stock-type", "2",
+            "--horizon-len", "8",
+            "--context-len", "2048",
+            "--years", "15",
+        ])
+
+        method, path, params, payload = call_open_api.command_to_request(args)
+
+        self.assertEqual("POST", method)
+        self.assertEqual("/api/open/v2/mtf/train", path)
+        self.assertIsNone(params)
+        self.assertEqual("mtf-pro", payload["prediction_type"])
+        self.assertEqual(8, payload["horizon_len"])
+        self.assertEqual(2048, payload["context_len"])
+        self.assertEqual(15, payload["years"])
+
+    def test_v2_job_uses_v2_job_endpoint(self):
+        parser = call_open_api.build_parser()
+        args = parser.parse_args(["mtf-v2-job", "--job-id", "job-train-1"])
+
+        method, path, params, payload = call_open_api.command_to_request(args)
+
+        self.assertEqual("GET", method)
+        self.assertEqual("/api/open/v2/mtf/jobs/job-train-1", path)
+        self.assertIsNone(params)
+        self.assertIsNone(payload)
+
     def test_v2_selects_pro_key_and_prefers_largest_context_when_omitted(self):
         response = {
             "data": {

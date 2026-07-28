@@ -45,6 +45,9 @@ ETF_RE = re.compile(r"^(5|1)\d{5}$")
 NAME_MAP = {}
 PREDICTION_POLL_ATTEMPTS = 24
 PREDICTION_POLL_INTERVAL_SECONDS = 5
+TRAIN_POLL_ATTEMPTS = 120
+TRAIN_POLL_INTERVAL_SECONDS = 10
+DEFAULT_TRAIN_CONTEXT_LEN = 2048
 
 
 class OpenAPIError(RuntimeError):
@@ -91,17 +94,21 @@ def is_prediction_cache_miss(error):
     return "prediction_cache_not_found" in json.dumps(error.body, ensure_ascii=False)
 
 
+def is_best_missing(error):
+    if not isinstance(error, OpenAPIError):
+        return False
+    error_body = error.body.get("error")
+    code = error_body.get("code") if isinstance(error_body, dict) else None
+    return code in {"not_found", "mtf_pro_best_not_found"}
+
+
 def future_contains_date(data, predict_date):
     dates = data.get("future_dates") if isinstance(data, dict) else None
     return isinstance(dates, list) and predict_date in {str(value) for value in dates}
 
 
 def wait_for_prediction_cache(v2_args):
-    """Poll the v2 dated future cache after an async prediction trigger.
-
-    v2 deliberately has no job-status route. The same dated cache query is the
-    public completion signal and keeps the v2 short-key flow self-contained.
-    """
+    """Poll the dated future cache after an async prediction trigger."""
     last_error = "prediction cache is still unavailable"
     target_date = v2_args[v2_args.index("--predict-date") + 1]
     for attempt in range(PREDICTION_POLL_ATTEMPTS):
@@ -118,6 +125,49 @@ def wait_for_prediction_cache(v2_args):
         if attempt < PREDICTION_POLL_ATTEMPTS - 1:
             time.sleep(PREDICTION_POLL_INTERVAL_SECONDS)
     raise RuntimeError(f"v2 预测缓存轮询超时: {last_error}")
+
+
+def wait_for_training_job(job_id):
+    """Wait until the best-model training job has persisted its result."""
+    last_status = "queued"
+    for attempt in range(TRAIN_POLL_ATTEMPTS):
+        response = call_api("mtf-v2-job", "--job-id", job_id)
+        data = response_data(response)
+        status = str(data.get("status") or "").strip().lower()
+        last_status = status or last_status
+        if status == "succeeded":
+            return data
+        if status == "failed":
+            error = data.get("error") or "training job failed"
+            raise RuntimeError(f"best 训练失败: {error}")
+        if status not in {"queued", "running"}:
+            raise RuntimeError(f"best 训练返回未知 job 状态: {status or '<empty>'}")
+        if attempt < TRAIN_POLL_ATTEMPTS - 1:
+            time.sleep(TRAIN_POLL_INTERVAL_SECONDS)
+    raise RuntimeError(f"best 训练 job 轮询超时: {job_id}, last_status={last_status}")
+
+
+def train_missing_best(stock_code, stock_type, horizon_len, context_len):
+    train_context_len = context_len or DEFAULT_TRAIN_CONTEXT_LEN
+    response = call_api(
+        "mtf-v2-train",
+        "--stock-code", stock_code,
+        "--stock-type", str(stock_type),
+        "--horizon-len", str(horizon_len),
+        "--context-len", str(train_context_len),
+        "--years", "15",
+    )
+    data = response_data(response)
+    job_id = str(data.get("job_id") or response.get("job_id") or "").strip()
+    if not job_id:
+        raise RuntimeError(f"best 训练未返回 job_id: {response}")
+    print(
+        f"[train] {stock_code} best 缺失，启动训练 job={job_id} "
+        f"(horizon={horizon_len}, context={train_context_len})"
+    )
+    result = wait_for_training_job(job_id)
+    print(f"[train] {stock_code} job={job_id} 成功，重新查询 best")
+    return result
 
 
 def get_candidates(hot_response):
@@ -219,17 +269,38 @@ def fetch_mtf_future(
     if context_len is not None:
         v2_args.extend(["--context-len", str(context_len)])
     v2_args.extend(["--predict-date", predict_date])
+    best_args = list(v2_args)
+    predict_date_index = best_args.index("--predict-date")
+    best_args = best_args[:predict_date_index]
+    cache_miss = False
     try:
         d = call_api("mtf-v2-future", *v2_args)
         if not future_contains_date(response_data(d), predict_date):
-            raise OpenAPIError(
-                f"future response does not contain target date {predict_date}",
-                {"error": {"code": "prediction_cache_not_found"}},
-            )
+            cache_miss = True
     except OpenAPIError as exc:
-        if not allow_predict or not is_prediction_cache_miss(exc):
+        if is_best_missing(exc):
+            if not allow_predict:
+                raise
+            train_missing_best(stock_code, stock_type, horizon_len, context_len)
+            try:
+                d = call_api("mtf-v2-future", *v2_args)
+            except OpenAPIError as retried:
+                if not is_prediction_cache_miss(retried):
+                    raise
+                cache_miss = True
+            else:
+                cache_miss = not future_contains_date(response_data(d), predict_date)
+        elif is_prediction_cache_miss(exc):
+            if not allow_predict:
+                raise
+            cache_miss = True
+        else:
             raise
-        selected = response_data(call_api("mtf-v2-best", *v2_args[:-2]))
+
+    if cache_miss:
+        if not allow_predict:
+            raise RuntimeError(f"{stock_code} future 缓存缺少 {predict_date}")
+        selected = response_data(call_api("mtf-v2-best", *best_args))
         key = selected["unique_key"]
         selected_horizon = int(selected["horizon_len"])
         selected_context = int(selected["context_len"])

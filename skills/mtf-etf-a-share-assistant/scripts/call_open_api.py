@@ -219,6 +219,13 @@ def build_parser():
     v2_predict_once.add_argument("--predict-date", help="Treat YYYY-MM-DD as the prediction date")
     v2_predict_once.add_argument("--prefer-cache", action="store_true")
 
+    v2_train = sub.add_parser("mtf-v2-train")
+    add_predict_args(v2_train, horizon_lens=V2_HORIZON_LENS)
+    v2_train.add_argument("--years", type=int, default=15)
+
+    v2_job = sub.add_parser("mtf-v2-job")
+    v2_job.add_argument("--job-id", required=True)
+
     predict_best = sub.add_parser("mtf-predict-best")
     add_predict_args(predict_best)
     predict_best.add_argument("--years", type=int, default=15)
@@ -336,6 +343,17 @@ def command_to_request(args):
         if args.predict_date is not None:
             payload["predict_date"] = args.predict_date
         return "POST", "/api/open/v2/mtf/predict-once", None, payload
+    if args.command == "mtf-v2-train":
+        return "POST", "/api/open/v2/mtf/train", None, {
+            "stock_code": args.stock_code,
+            "stock_type": args.stock_type,
+            "prediction_type": "mtf-pro",
+            "horizon_len": args.horizon_len,
+            "context_len": args.context_len,
+            "years": args.years,
+        }
+    if args.command == "mtf-v2-job":
+        return "GET", f"/api/open/v2/mtf/jobs/{args.job_id}", None, None
     if args.command == "mtf-backtest":
         return "POST", "/api/open/v1/mtf/backtest", None, parse_json_arg(args.json) or {}
     if args.command == "mtf-job":
@@ -439,6 +457,8 @@ def main():
         "mtf-v2-etf-hot",
         "mtf-v2-best",
         "mtf-v2-future",
+        "mtf-v2-train",
+        "mtf-v2-job",
         "mtf-v2-predict-once",
     }
     if v2_command:
