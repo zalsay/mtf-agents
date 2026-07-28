@@ -10,11 +10,13 @@ normalize_mtf_future_archive.py 能吃掉的归档 JSON。
 关键约束:
 - close_observation.source 必须为 'easy_tdx_qfq_daily_kline' (前复权口径),
   与 easy-tdx 拉取的路径点一致, 避免 split_adjustments.json 的份额拆分因子被重复计算。
-- ETF 预测只用 mtf-pro; mtf-future 只读取指定日期的已有缓存。
-  缓存未命中时显式调用 mtf-predict-once --prefer-cache，完成后再按日期回查。
+- ETF 预测只用 mtf-pro，并通过 v2 客户端先选择 512/1024/2048 的 best key。
+  v2 future 查询只读取指定日期的已有缓存；缓存未命中默认跳过。
+  如需补算，必须显式传入 --allow-predict。
 
 用法:
-    python3 scripts/build_daily_archive.py [--date YYYY-MM-DD] [--dry-run]
+    python3 scripts/build_daily_archive.py [--date YYYY-MM-DD] [--horizon-len 7|14|28]
+        [--context-len 512|1024|2048] [--allow-predict] [--dry-run]
 默认日期 = 今天。
 """
 import argparse
@@ -34,8 +36,9 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "skills/mtf-etf-a-share-assistant/scripts"
 ENV = SCRIPTS / ".env.open-api"
 INDEX_SYMBOL = "000001"
-INDEX_KEY = "000001_best_hlen_7_clen_2048_v_2.5_mtf-pro"
 CRASH_THRESHOLD = -3.0
+SUPPORTED_CONTEXT_LENS = (512, 1024, 2048)
+SUPPORTED_HORIZON_LENS = (7, 14, 28)
 # ETF 代码特征: 沪市 5xxxxx / 深市 1xxxxx
 ETF_RE = re.compile(r"^(5|1)\d{5}$")
 # 规整 symbol -> 名称 (来自 watchlist 的 company_name)
@@ -86,37 +89,35 @@ def is_prediction_cache_miss(error):
     return "prediction_cache_not_found" in json.dumps(error.body, ensure_ascii=False)
 
 
-def prediction_config_from_key(unique_key):
-    horizon_match = re.search(r"_hlen_(\d+)_", unique_key)
-    context_match = re.search(r"_clen_(\d+)_", unique_key)
-    if not horizon_match or not context_match:
-        raise RuntimeError(f"无法从 unique_key 解析预测配置: {unique_key}")
-    prediction_type = "mtf-pro" if unique_key.endswith("_mtf-pro") else "mtf-lite"
-    return int(horizon_match.group(1)), int(context_match.group(1)), prediction_type
+def wait_for_prediction_cache(v2_args):
+    """Poll the v2 dated future cache after an async prediction trigger.
 
-
-def wait_for_prediction_job(response):
-    data = response_data(response)
-    job_id = data.get("job_id") or response.get("job_id")
-    if not job_id:
-        return data
-    for _ in range(40):  # 最多等约 10 分钟
-        job = response_data(call_api("mtf-job", "--job-id", str(job_id)))
-        status = str(job.get("status", "")).strip().lower()
-        if status in {"succeeded", "success", "completed", "done"} or job.get("success") is True:
-            return job
-        if status in {"failed", "error", "cancelled", "canceled"}:
-            raise RuntimeError(f"预测 job {job_id} 失败: {job.get('error') or status}")
-        time.sleep(15)
-    raise RuntimeError(f"预测 job {job_id} 轮询超时")
+    v2 deliberately has no job-status route. The same dated cache query is the
+    public completion signal and keeps the v2 short-key flow self-contained.
+    """
+    last_error = "prediction cache is still unavailable"
+    for attempt in range(40):  # 最多等约 10 分钟
+        try:
+            response = call_api("mtf-v2-future", *v2_args)
+            data = response_data(response)
+            if data.get("predicted_change_percent") or data.get("future_dates"):
+                return data
+            last_error = "prediction response did not contain future data"
+        except OpenAPIError as exc:
+            if not is_prediction_cache_miss(exc):
+                raise
+            last_error = str(exc)
+        if attempt < 39:
+            time.sleep(15)
+    raise RuntimeError(f"v2 预测缓存轮询超时: {last_error}")
 
 
 def get_candidates():
-    """返回 {规整symbol: unique_key}，仅含 ETF/基金类标的。
+    """返回 {规整symbol: stock_type}，仅含 ETF/基金类标的。
 
     watchlist 的 symbol 带交易所前缀 (sh/sz/bj)，需先去掉；并用 stock_type==2
     或 ETF 代码特征 (5xxxxx 沪市 / 1xxxxx 深市) 过滤。上证指数不在 watchlist 内，
-    由 build_index_risk 单独处理。
+    由 build_index_risk 单独处理。watchlist 中的旧 unique_key 不是 v2 的配置来源。
     """
     d = call_api("watchlist")
     wl = (d.get("data") or {}).get("watchlist", [])
@@ -124,14 +125,13 @@ def get_candidates():
     for w in wl:
         st = w.get("stock") or {}
         raw_sym = str(st.get("symbol", "") or "")
-        uk = w.get("unique_key") or ""
-        if not raw_sym or not uk:
+        if not raw_sym:
             continue
         sym = re.sub(r"^(sh|sz|bj)", "", raw_sym, flags=re.I) or raw_sym
         stype = w.get("stock_type")
         is_etf = (str(stype) == "2") or bool(ETF_RE.match(sym))
         if is_etf:
-            out[sym] = uk
+            out[sym] = 2
             NAME_MAP[sym] = st.get("company_name", "") or ""
             print(f"[cand] {raw_sym} -> {sym} ({NAME_MAP[sym]})")
     return out
@@ -173,8 +173,15 @@ def fetch_and_save_etf_hot(report_date, out_dir, dry_run=False):
     return out_path
 
 
-def build_index_risk(report_date):
-    resp = fetch_mtf_future(INDEX_KEY, report_date, INDEX_SYMBOL, stock_type=3)
+def build_index_risk(report_date, horizon_len, context_len, allow_predict=False):
+    resp = fetch_mtf_future(
+        report_date,
+        INDEX_SYMBOL,
+        stock_type=3,
+        horizon_len=horizon_len,
+        context_len=context_len,
+        allow_predict=allow_predict,
+    )
     fdates = resp.get("future_dates") or []
     pct = resp.get("predicted_change_percent") or []
     target = report_date if report_date in fdates else (fdates[-1] if fdates else report_date)
@@ -194,33 +201,51 @@ def build_index_risk(report_date):
     }
 
 
-def fetch_mtf_future(key, predict_date, stock_code, stock_type):
-    query_args = ("--unique-key", key, "--predict-date", predict_date)
+def fetch_mtf_future(
+    predict_date,
+    stock_code,
+    stock_type,
+    horizon_len=7,
+    context_len=None,
+    allow_predict=False,
+):
+    v2_args = [
+        "--symbol", stock_code,
+        "--stock-type", str(stock_type),
+        "--horizon-len", str(horizon_len),
+    ]
+    if context_len is not None:
+        v2_args.extend(["--context-len", str(context_len)])
+    v2_args.extend(["--predict-date", predict_date])
     try:
-        d = call_api("mtf-future", *query_args)
+        d = call_api("mtf-v2-future", *v2_args)
     except OpenAPIError as exc:
-        if not is_prediction_cache_miss(exc):
+        if not allow_predict or not is_prediction_cache_miss(exc):
             raise
-        horizon_len, context_len, prediction_type = prediction_config_from_key(key)
+        selected = response_data(call_api("mtf-v2-best", *v2_args[:-2]))
+        key = selected["unique_key"]
+        selected_horizon = int(selected["horizon_len"])
+        selected_context = int(selected["context_len"])
         print(
-            f"[cache-miss] {key} {predict_date}; 显式触发 mtf-predict-once "
-            f"(horizon={horizon_len}, context={context_len}, type={prediction_type})"
+            f"[cache-miss] {key} {predict_date}; 显式触发 mtf-v2-predict-once "
+            f"(horizon={selected_horizon}, context={selected_context}, type=mtf-pro)"
         )
         trigger = call_api(
-            "mtf-predict-once",
+            "mtf-v2-predict-once",
             "--stock-code", stock_code,
             "--stock-type", str(stock_type),
-            "--prediction-type", prediction_type,
-            "--horizon-len", str(horizon_len),
-            "--context-len", str(context_len),
+            "--prediction-type", "mtf-pro",
+            "--horizon-len", str(selected_horizon),
+            "--context-len", str(selected_context),
             "--predict-date", predict_date,
             "--prefer-cache",
         )
-        wait_for_prediction_job(trigger)
-        d = call_api("mtf-future", *query_args)
+        del trigger
+        wait_for_prediction_cache(v2_args)
+        d = call_api("mtf-v2-future", *v2_args)
     data = response_data(d)
     if not data.get("predicted_change_percent") and not data.get("future_dates"):
-        raise RuntimeError(f"{key} 未返回有效预测")
+        raise RuntimeError(f"{stock_code} 未返回有效预测")
     return data
 
 
@@ -263,7 +288,13 @@ def _back_days(date_text, n):
     return (datetime.strptime(date_text, "%Y-%m-%d") - timedelta(days=n)).strftime("%Y-%m-%d")
 
 
-def build(report_date, dry_run=False):
+def build(
+    report_date,
+    horizon_len=7,
+    context_len=None,
+    allow_predict=False,
+    dry_run=False,
+):
     out_dir = ROOT / "reports" / "mtf-etf" / report_date
     if not dry_run:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -279,9 +310,16 @@ def build(report_date, dry_run=False):
     print(f"[build] {report_date}: {len(cands)} 个 ETF 候选")
 
     items = []
-    for sym, key in cands.items():
+    for sym, stock_type in cands.items():
         try:
-            resp = fetch_mtf_future(key, report_date, sym, stock_type=2)
+            resp = fetch_mtf_future(
+                report_date,
+                sym,
+                stock_type=stock_type,
+                horizon_len=horizon_len,
+                context_len=context_len,
+                allow_predict=allow_predict,
+            )
             name = (get_watchlist_name(sym) or resp.get("short_name")
                     or resp.get("name") or sym)
             actual, actual_date = fetch_close_best_effort(sym, report_date)
@@ -303,7 +341,12 @@ def build(report_date, dry_run=False):
         print(f"[build] ETF {sym} {name}: {report_date} 实际收盘 = {actual} (obs {actual_date})")
 
     try:
-        index_risk = build_index_risk(report_date)
+        index_risk = build_index_risk(
+            report_date,
+            horizon_len=horizon_len,
+            context_len=context_len,
+            allow_predict=allow_predict,
+        )
         print(f"[build] 上证指数同日预计 {index_risk['expected_change_percent']:+.4f}% "
               f"triggered={index_risk['triggered']}")
     except Exception as e:
@@ -335,9 +378,22 @@ def build(report_date, dry_run=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
+    ap.add_argument("--horizon-len", type=int, choices=SUPPORTED_HORIZON_LENS, default=7)
+    ap.add_argument("--context-len", type=int, choices=SUPPORTED_CONTEXT_LENS)
+    ap.add_argument(
+        "--allow-predict",
+        action="store_true",
+        help="缓存缺失时显式触发 mtf-pro 单次预测；默认只查缓存",
+    )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
-    build(args.date, dry_run=args.dry_run)
+    build(
+        args.date,
+        horizon_len=args.horizon_len,
+        context_len=args.context_len,
+        allow_predict=args.allow_predict,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":
