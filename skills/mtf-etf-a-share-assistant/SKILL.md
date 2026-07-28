@@ -30,7 +30,7 @@ cd mtf-agents
 
 每日 ETF 工作流的脚本优先顺序：
 
-1. 用 `scripts/build_daily_archive.py --date YYYY-MM-DD` 一键构建当日 `YYYY-MM-DD-mtf-future.json`（内部先拉取并落盘 `YYYY-MM-DD-etf-hot.json`，直接以 `data.items` 中的热门 ETF 作为目标，再通过 v2 规则选择 mtf-pro best key、按归档日期读取已有 future 缓存；默认 cache miss 只跳过，明确需要补算时才增加 `--allow-predict`；最后用 easy-tdx(QFQ) 回填当日收盘；`close_observation.source` 固定为 `easy_tdx_qfq_daily_kline` 避免拆分因子双计；单只预测/行情失败自动跳过继续）。
+1. 用 `scripts/build_daily_archive.py --date YYYY-MM-DD` 一键构建当日 `YYYY-MM-DD-mtf-future.json`（内部先通过 v2 `etf-hot` 拉取并落盘 `YYYY-MM-DD-etf-hot.json`，直接以 `data.items` 中的热门 ETF 作为目标，再通过 v2 规则选择 mtf-pro best key、按归档日期读取已有 future 缓存；默认 cache miss 只跳过，明确需要补算时才增加 `--allow-predict`；最后用 easy-tdx(QFQ) 回填当日收盘；`close_observation.source` 固定为 `easy_tdx_qfq_daily_kline` 避免拆分因子双计；单只预测/行情失败自动跳过继续）。
 2. 用 `apply_daily_trade_plan.py` 按上一交易日计划生成当日模拟账户文件。
 3. 用 `normalize_mtf_future_archive.py` 归一化 `YYYY-MM-DD-mtf-future.json`。
 4. 用 `render_daily_etf_outputs.py` 从归一化归档和模拟账户文件生成：
@@ -44,7 +44,7 @@ cd mtf-agents
 示例：
 
 ```bash
-# 1) 一键构建当日预测归档 (etf-hot -> v2 mtf-future + easy-tdx 回填)
+# 1) 一键构建当日预测归档 (v2 etf-hot -> v2 mtf-future + easy-tdx 回填)
 python3 scripts/build_daily_archive.py --date YYYY-MM-DD
 
 # 可选预测配置；context 缺省时按 2048 -> 1024 -> 512 选择 pro best key
@@ -78,7 +78,7 @@ https://go-api.meetlife.com.cn/mtf-service
 优先使用脚本调用，不直接手写请求：
 
 ```bash
-skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-hot
+skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-etf-hot
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-quotes 510300 159919
 skills/mtf-etf-a-share-assistant/scripts/get_open_api_key.sh \
   --v2 --server-name mtf-agents --user-id external-user-id
@@ -107,7 +107,7 @@ API key 默认从 `.env.open-api` 读取。若文件不在仓库根目录，调�
 --env-file skills/mtf-etf-a-share-assistant/scripts/.env.open-api
 ```
 
-不得提交 `.env.open-api`、API key、密码或其它凭证。v2 短 key 使用 `MTF_OPEN_API_V2_KEY`，v1 数据发现接口继续使用 `FINTRACK_OPEN_API_KEY`。
+不得提交 `.env.open-api`、API key、密码或其它凭证。v2 热门 ETF、best、future 和 predict 使用 `MTF_OPEN_API_V2_KEY`；v1 数据接口继续使用 `FINTRACK_OPEN_API_KEY`。
 v2 key 申请使用 `GET /api/open/v2/auth/public-key` 和 RSA-OAEP-SHA256；申请密文只在请求期间存在，后续使用服务端返回的短 key。
 公钥每次申请时动态获取，不在 skill 中硬编码；当前服务返回 `ciphertext_bytes=256`，短 key 长度为 50 个字符。
 
@@ -117,7 +117,7 @@ v2 key 申请使用 `GET /api/open/v2/auth/public-key` 和 RSA-OAEP-SHA256；申
 
 - ETF/基金统一按 `stock_type=2`。
 - 交易筛选只使用 `prediction_type=mtf-pro`，不使用 lite 兜底。
-- 每日工作流的候选直接来自 `etf-hot` 返回的 `data.items`，逐个使用其 `code` 查询 v2 best 与指定日期 future；不再使用 watchlist 作为候选源。
+- 每日工作流的候选直接来自 v2 `etf-hot` 返回的 `data.items`，逐个使用其 `code` 查询 v2 best 与指定日期 future；不再使用 watchlist 作为候选源。
 - v2 只允许 `context_len=512/1024/2048`、`horizon_len=8/16/32/64`，默认使用 `8`；先调用 `mtf-best-by-config` 聚合并只选 `mtf_pro_unique_key`。
 - 候选缺少指定日期的 future 时，使用 `mtf-v2-future` 只查缓存；cache miss 不会自动推理。
 - 需要补算时必须由调用方显式执行 `mtf-v2-predict-once --prediction-type mtf-pro --predict-date YYYY-MM-DD --prefer-cache`，然后轮询相同日期的 `mtf-v2-future` 直到缓存出现；v2 没有可供客户端调用的 job 查询路由，不得改用 v1 `mtf-job`。

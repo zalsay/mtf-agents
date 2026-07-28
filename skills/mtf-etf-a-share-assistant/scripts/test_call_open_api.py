@@ -10,6 +10,17 @@ import call_open_api
 
 
 class CallOpenApiTests(unittest.TestCase):
+    def test_v2_hot_command_uses_v2_endpoint(self):
+        parser = call_open_api.build_parser()
+        args = parser.parse_args(["mtf-v2-etf-hot"])
+
+        method, path, params, payload = call_open_api.command_to_request(args)
+
+        self.assertEqual("GET", method)
+        self.assertEqual("/api/open/v2/etf/hot", path)
+        self.assertIsNone(params)
+        self.assertIsNone(payload)
+
     def test_predict_once_matches_contract_payload(self):
         args = argparse.Namespace(
             command="mtf-predict-once",

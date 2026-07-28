@@ -64,7 +64,7 @@ skills/mtf-etf-a-share-assistant/scripts/get_open_api_key.sh
 skills/mtf-etf-a-share-assistant/scripts/get_open_api_key.sh \
   --v2 --server-name mtf-agents --user-id external-user-id
 
-skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-hot
+skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-etf-hot
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-quotes 510300 159919
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-future --symbol 510300 --stock-type 2 --horizon-len 8 --context-len 2048 --predict-date YYYY-MM-DD
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-predict-once --stock-code 510300 --stock-type 2 --horizon-len 8 --context-len 2048 --prefer-cache
@@ -87,12 +87,12 @@ v2 公钥每次申请时动态获取，不写入仓库；当前服务使用 RSA-
    - 面向用户保留原始名称/代码；调用接口时传规范化参数。
 
 3. **收集候选与行情**
-   - `GET /api/open/v1/etf/hot`：热门 ETF 雷达结构化列表。
+   - `GET /api/open/v2/etf/hot`：使用 v2 key 获取热门 ETF 雷达结构化列表。
    - `POST /api/open/v1/etf/quotes`：最新行情。
    - `GET /api/open/v1/etf/lookup?symbol=...`：补齐 ETF 名称。
 
 4. **查询已有 MTF 结果**
-   - 每日热门 ETF 流程直接使用 `GET /api/open/v1/etf/hot` 返回的 `data.items` 作为 MTF 查询目标，不再调用 `watchlist` 缩小候选范围。
+   - 每日热门 ETF 流程直接使用 `GET /api/open/v2/etf/hot` 返回的 `data.items` 作为 MTF 查询目标，不再调用 `watchlist` 缩小候选范围。
    - `GET /api/open/v1/watchlist`：仅在用户明确要求自选清单或 v1 用户级操作时调用；v2 best/future 不依赖本地用户表。
    - `GET /api/open/v1/mtf/best?stock_type=2&include_validation=true`：查询可访问 best 结果；如服务端返回验证信息则一并带出。
    - v2 客户端先通过 `GET /api/open/v2/mtf/best/by-config` 聚合配置，只选择 `mtf_pro_unique_key`，`context_len` 仅允许 `512/1024/2048`，`horizon_len` 允许 `8/16/32/64`，默认使用 `8`。

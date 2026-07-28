@@ -204,6 +204,10 @@ def build_parser():
         "mtf-v2-public-key",
         help="Fetch the mtf-service v2 RSA public key used to request a short API key",
     )
+    sub.add_parser(
+        "mtf-v2-etf-hot",
+        help="Fetch the hot ETF radar with a v2 API key",
+    )
 
     predict_once = sub.add_parser("mtf-predict-once")
     add_predict_args(predict_once)
@@ -270,6 +274,8 @@ def add_v2_selection_args(parser):
 def command_to_request(args):
     if args.command == "mtf-v2-public-key":
         return "GET", "/api/open/v2/auth/public-key", None, None
+    if args.command == "mtf-v2-etf-hot":
+        return "GET", "/api/open/v2/etf/hot", None, None
     if args.command == "etf-hot":
         return "GET", "/api/open/v1/etf/hot", None, None
     if args.command == "etf-quotes":
@@ -429,7 +435,12 @@ def main():
     args = parser.parse_args()
     load_env_file(args.env_file)
     args.base_url = args.base_url or os.environ.get("MTF_API_BASE_URL", DEFAULT_BASE_URL)
-    v2_command = args.command in {"mtf-v2-best", "mtf-v2-future", "mtf-v2-predict-once"}
+    v2_command = args.command in {
+        "mtf-v2-etf-hot",
+        "mtf-v2-best",
+        "mtf-v2-future",
+        "mtf-v2-predict-once",
+    }
     if v2_command:
         args.api_key = (
             args.api_key

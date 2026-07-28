@@ -2,7 +2,7 @@
 """构建当日 MTF future 归档 (reports/mtf-etf/YYYY-MM-DD/YYYY-MM-DD-mtf-future.json)。
 
 该脚本供每日自动化工作流第 1 步调用: 自动从 Open API 拉取
-- etf-hot 热门 ETF 雷达, 持久化为本地快照 YYYY-MM-DD-etf-hot.json, 并作为预测目标列表
+- v2 etf-hot 热门 ETF 雷达, 持久化为本地快照 YYYY-MM-DD-etf-hot.json, 并作为预测目标列表
 - 每个热门 ETF 的指定日期 mtf-future 缓存查询
 用 easy-tdx(QFQ) 回填当日实际收盘, 组装成
 normalize_mtf_future_archive.py 能吃掉的归档 JSON。
@@ -140,16 +140,16 @@ def get_candidate_name(sym):
 
 
 def fetch_and_save_etf_hot(report_date, out_dir, dry_run=False):
-    """拉取 etf-hot 并持久化快照；返回原始 Open API 响应作为候选源。"""
+    """拉取 v2 etf-hot 并持久化快照；返回原始 Open API 响应作为候选源。"""
     try:
-        raw = call_api("etf-hot")
+        raw = call_api("mtf-v2-etf-hot")
     except Exception as e:
         raise OpenAPIError(f"etf-hot 拉取失败: {e}") from e
     envelope_err = (raw.get("status") == "error") or bool(raw.get("error"))
     payload = {
         "report_date": report_date,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "source": "GET /api/open/v1/etf/hot",
+        "source": "GET /api/open/v2/etf/hot",
         "ok": not envelope_err,
         "data": (raw.get("data") or {}),
         "error": raw.get("error") if envelope_err else None,
