@@ -48,9 +48,9 @@ cd mtf-agents
 # 1) 一键构建当日预测归档 (v2 etf-hot -> v2 mtf-future + easy-tdx 回填)
 python3 scripts/build_daily_archive.py --date YYYY-MM-DD
 
-# 可选预测配置；context 缺省时按 2048 -> 1024 -> 512 选择 pro best key，future 缺失自动补算
+# 可选预测配置；best/future 使用训练服务返回的有效配置，future 缺失自动补算
 python3 scripts/build_daily_archive.py --date YYYY-MM-DD \
-  --horizon-len 8 --context-len 1024
+  --horizon-len 8
 
 # 仅诊断已有缓存，不触发补算
 python3 scripts/build_daily_archive.py --date YYYY-MM-DD --cache-only
@@ -87,16 +87,16 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py etf-quotes 510300 1599
 skills/mtf-etf-a-share-assistant/scripts/get_open_api_key.sh \
   --v2 --server-name mtf-agents --user-id external-user-id
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-best \
-  --symbol 515880 --stock-type 2 --horizon-len 8 --context-len 2048
+  --symbol 515880 --stock-type 2 --horizon-len 8
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-future \
   --symbol 515880 --stock-type 2 --horizon-len 8 \
   --predict-date YYYY-MM-DD
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-public-key
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-predict-once \
-  --stock-code 515880 --stock-type 2 --horizon-len 8 --context-len 2048 \
+  --stock-code 515880 --stock-type 2 --horizon-len 8 \
   --predict-date YYYY-MM-DD --prefer-cache
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-train \
-  --stock-code 515880 --stock-type 2 --horizon-len 8 --context-len 2048
+  --stock-code 515880 --stock-type 2 --horizon-len 8
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-job \
   --job-id JOB_ID
 # 训练完成后再查询 best；future 补算后使用同一个目标日期轮询，以日期命中作为完成信号。
@@ -119,10 +119,10 @@ API key 默认从 `.env.open-api` 读取。若文件不在仓库根目录，调�
 - ETF/基金统一按 `stock_type=2`。
 - 交易筛选只使用 `prediction_type=mtf-pro`，不使用 lite 兜底。
 - 每日工作流的候选直接来自 v2 `etf-hot` 返回的 `data.items`，逐个使用其 `code` 查询 v2 best 与指定日期 future；不再使用 watchlist 作为候选源。
-- v2 只允许 `context_len=512/1024/2048`、`horizon_len=8/16/32/64`，默认使用 `8`；先调用 `mtf-best-by-config` 聚合并只选 `mtf_pro_unique_key`。
+- v2 使用 `horizon_len=8/16/32/64`，默认使用 `8`；先调用 `mtf-best-by-config` 聚合并只选 `mtf_pro_unique_key`，配置由训练服务根据可用历史窗口决定。
 - v2 `mtf-v2-future` 接口本身只查已有缓存，永不在 cached 查询中直接触发推理；gateway 只有在 `predict_date` 精确出现在返回的 `future_dates` chunk window 内时才视为命中，否则必须按 cache miss 处理并返回 404。
-- 每日 workflow 遇到 best 缺失时，自动使用相同的 horizon/context 启动 `mtf-v2-train`，通过 `mtf-v2-job` 轮询至 `succeeded`；训练失败或超时才跳过，训练成功后必须重新查询 best。
-- best 可用但 future cache miss 时，自动执行 `mtf-v2-predict-once --prediction-type mtf-pro --predict-date YYYY-MM-DD --prefer-cache`，然后使用相同的 `mtf-v2-future --predict-date YYYY-MM-DD` 严格轮询，直到该日期出现在 `future_dates` window 内；`--cache-only` 可关闭训练和补算。完成信号以目标日期的 future 命中为准。
+- 每日 workflow 遇到 best 缺失时，自动启动 `mtf-v2-train`，通过 `mtf-v2-job` 轮询至 `succeeded`；训练失败或超时才跳过，训练成功后必须重新查询 best 并复用服务返回的配置。
+- best 可用但 future cache miss 时，自动执行 `mtf-v2-predict-once --prediction-type mtf-pro --predict-date YYYY-MM-DD --prefer-cache`，然后使用 best 返回的配置调用 `mtf-v2-future --predict-date YYYY-MM-DD` 严格轮询，直到该日期出现在 `future_dates` window 内；`--cache-only` 可关闭训练和补算。完成信号以目标日期的 future 命中为准。
 - `predict_date` 始终是目标 future chunk 的日期，不得改写成前一交易日，也不得由客户端把它转换成 `end_date`；推理服务使用目标日前的实际历史生成从该目标日开始的 future window。
 - v2 客户端不接收、不判断会员等级；权限由服务端 API key 统一处理。
 - `watchlist` 仅用于用户明确要求的自选清单或用户级操作；每日热门 ETF 工作流不因 watchlist 内容或限制而缩小候选范围。
@@ -133,7 +133,7 @@ API key 默认从 `.env.open-api` 读取。若文件不在仓库根目录，调�
 
 ```bash
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-future \
-  --symbol 000001 --stock-type 3 --horizon-len 8 --context-len 2048 \
+  --symbol 000001 --stock-type 3 --horizon-len 8 \
   --predict-date YYYY-MM-DD
 ```
 
