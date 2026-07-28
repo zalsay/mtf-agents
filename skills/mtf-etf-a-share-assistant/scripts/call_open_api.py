@@ -13,7 +13,8 @@ from urllib.request import Request, urlopen
 DEFAULT_BASE_URL = "https://go-api.meetlife.com.cn/mtf-service"
 DEFAULT_ENV_FILE = ".env.open-api"
 V2_CONTEXT_LENS = (512, 1024, 2048)
-V2_HORIZON_LENS = (7, 14, 28)
+V1_HORIZON_LENS = (7, 14, 28)
+V2_HORIZON_LENS = (8,)
 
 
 def load_env_file(path):
@@ -69,7 +70,7 @@ def _best_config_items(response):
     return []
 
 
-def select_v2_mtf_pro_config(response, horizon_len=7, context_len=None):
+def select_v2_mtf_pro_config(response, horizon_len=8, context_len=None):
     """Select one current mtf-pro key from the aggregate best response.
 
     v2 deliberately has no membership-level input. The server still owns API-key
@@ -210,7 +211,7 @@ def build_parser():
     predict_once.add_argument("--prefer-cache", action="store_true")
 
     v2_predict_once = sub.add_parser("mtf-v2-predict-once")
-    add_predict_args(v2_predict_once)
+    add_predict_args(v2_predict_once, horizon_lens=V2_HORIZON_LENS)
     v2_predict_once.add_argument("--predict-date", help="Treat YYYY-MM-DD as the prediction date")
     v2_predict_once.add_argument("--prefer-cache", action="store_true")
 
@@ -246,18 +247,18 @@ def build_parser():
     return parser
 
 
-def add_predict_args(parser):
+def add_predict_args(parser, horizon_lens=V1_HORIZON_LENS):
     parser.add_argument("--stock-code", required=True)
     parser.add_argument("--stock-type", type=int, default=2)
     parser.add_argument("--prediction-type", choices=["mtf-pro"], default="mtf-pro")
-    parser.add_argument("--horizon-len", type=int, choices=V2_HORIZON_LENS, default=7)
+    parser.add_argument("--horizon-len", type=int, choices=horizon_lens, default=horizon_lens[0])
     parser.add_argument("--context-len", type=int, choices=V2_CONTEXT_LENS, default=512)
 
 
 def add_v2_selection_args(parser):
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--stock-type", type=int, default=2)
-    parser.add_argument("--horizon-len", type=int, choices=V2_HORIZON_LENS, default=7)
+    parser.add_argument("--horizon-len", type=int, choices=V2_HORIZON_LENS, default=8)
     parser.add_argument(
         "--context-len",
         type=int,

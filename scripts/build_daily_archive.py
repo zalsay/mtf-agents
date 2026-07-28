@@ -15,7 +15,7 @@ normalize_mtf_future_archive.py 能吃掉的归档 JSON。
   如需补算，必须显式传入 --allow-predict。
 
 用法:
-    python3 scripts/build_daily_archive.py [--date YYYY-MM-DD] [--horizon-len 7|14|28]
+    python3 scripts/build_daily_archive.py [--date YYYY-MM-DD] [--horizon-len 8]
         [--context-len 512|1024|2048] [--allow-predict] [--dry-run]
 默认日期 = 今天。
 """
@@ -38,7 +38,7 @@ ENV = SCRIPTS / ".env.open-api"
 INDEX_SYMBOL = "000001"
 CRASH_THRESHOLD = -3.0
 SUPPORTED_CONTEXT_LENS = (512, 1024, 2048)
-SUPPORTED_HORIZON_LENS = (7, 14, 28)
+SUPPORTED_HORIZON_LENS = (8,)
 # ETF 代码特征: 沪市 5xxxxx / 深市 1xxxxx
 ETF_RE = re.compile(r"^(5|1)\d{5}$")
 # 规整 symbol -> 名称 (来自 watchlist 的 company_name)
@@ -205,7 +205,7 @@ def fetch_mtf_future(
     predict_date,
     stock_code,
     stock_type,
-    horizon_len=7,
+    horizon_len=8,
     context_len=None,
     allow_predict=False,
 ):
@@ -290,7 +290,7 @@ def _back_days(date_text, n):
 
 def build(
     report_date,
-    horizon_len=7,
+    horizon_len=8,
     context_len=None,
     allow_predict=False,
     dry_run=False,
@@ -330,7 +330,7 @@ def build(
             "symbol": sym,
             "name": name,
             "theme": "",
-            "horizon_days": resp.get("horizon_len", 7),
+            "horizon_days": resp.get("horizon_len", 8),
             "raw_response": {"data": resp},
             "close_observation": {
                 "date": actual_date,
@@ -378,7 +378,7 @@ def build(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
-    ap.add_argument("--horizon-len", type=int, choices=SUPPORTED_HORIZON_LENS, default=7)
+    ap.add_argument("--horizon-len", type=int, choices=SUPPORTED_HORIZON_LENS, default=8)
     ap.add_argument("--context-len", type=int, choices=SUPPORTED_CONTEXT_LENS)
     ap.add_argument(
         "--allow-predict",

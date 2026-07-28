@@ -61,6 +61,17 @@ class CallOpenApiTests(unittest.TestCase):
 
         self.assertEqual(512, args.context_len)
         self.assertEqual("mtf-pro", args.prediction_type)
+        self.assertEqual(7, args.horizon_len)
+
+    def test_v2_commands_reject_non_eight_horizon(self):
+        parser = call_open_api.build_parser()
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args([
+                "mtf-v2-predict-once",
+                "--stock-code", "510300",
+                "--horizon-len", "7",
+            ])
 
     def test_v2_best_command_uses_aggregate_endpoint_and_supported_defaults(self):
         parser = call_open_api.build_parser()
@@ -74,7 +85,7 @@ class CallOpenApiTests(unittest.TestCase):
         self.assertEqual("GET", method)
         self.assertEqual("/api/open/v2/mtf/best/by-config", path)
         self.assertEqual(
-            {"symbol": "510300", "stock_type": 2, "horizon_len": 7, "context_len": None},
+            {"symbol": "510300", "stock_type": 2, "horizon_len": 8, "context_len": None},
             params,
         )
         self.assertIsNone(payload)
@@ -84,7 +95,7 @@ class CallOpenApiTests(unittest.TestCase):
         args = parser.parse_args([
             "mtf-v2-predict-once",
             "--stock-code", "510300",
-            "--horizon-len", "14",
+            "--horizon-len", "8",
             "--context-len", "1024",
             "--predict-date", "2026-07-28",
             "--prefer-cache",
@@ -96,7 +107,7 @@ class CallOpenApiTests(unittest.TestCase):
         self.assertEqual("/api/open/v2/mtf/predict-once", path)
         self.assertIsNone(params)
         self.assertEqual("mtf-pro", payload["prediction_type"])
-        self.assertEqual(14, payload["horizon_len"])
+        self.assertEqual(8, payload["horizon_len"])
         self.assertEqual(1024, payload["context_len"])
         self.assertTrue(payload["prefer_cache"])
 
@@ -107,7 +118,7 @@ class CallOpenApiTests(unittest.TestCase):
                 "items": [
                     {
                         "symbol": "510300",
-                        "horizon_len": 7,
+                        "horizon_len": 8,
                         "context_len": 512,
                         "mtf_version": "v_2.5",
                         "mtf_lite_unique_key": "lite-512",
@@ -115,7 +126,7 @@ class CallOpenApiTests(unittest.TestCase):
                     },
                     {
                         "symbol": "510300",
-                        "horizon_len": 7,
+                        "horizon_len": 8,
                         "context_len": 2048,
                         "mtf_version": "v_2.5",
                         "mtf_lite_unique_key": "lite-2048",
@@ -137,25 +148,25 @@ class CallOpenApiTests(unittest.TestCase):
                 "items": [
                     {
                         "symbol": "510300",
-                        "horizon_len": 14,
+                        "horizon_len": 8,
                         "context_len": 1024,
-                        "mtf_pro_unique_key": "pro-14-1024",
+                        "mtf_pro_unique_key": "pro-8-1024",
                     },
                     {
                         "symbol": "510300",
-                        "horizon_len": 14,
+                        "horizon_len": 8,
                         "context_len": 2048,
-                        "mtf_lite_unique_key": "lite-14-2048",
+                        "mtf_lite_unique_key": "lite-8-2048",
                     },
                 ]
             }
         }
 
-        selected = call_open_api.select_v2_mtf_pro_config(response, 14, 1024)
-        self.assertEqual("pro-14-1024", selected["unique_key"])
+        selected = call_open_api.select_v2_mtf_pro_config(response, 8, 1024)
+        self.assertEqual("pro-8-1024", selected["unique_key"])
 
         with self.assertRaises(LookupError):
-            call_open_api.select_v2_mtf_pro_config(response, 14, 2048)
+            call_open_api.select_v2_mtf_pro_config(response, 8, 2048)
 
     def test_v2_future_queries_selected_key_and_requested_date(self):
         parser = call_open_api.build_parser()
@@ -173,10 +184,10 @@ class CallOpenApiTests(unittest.TestCase):
                     "symbol": "510300",
                     "items": [{
                         "symbol": "510300",
-                        "horizon_len": 7,
+                        "horizon_len": 8,
                         "context_len": 1024,
                         "mtf_version": "v_2.5",
-                        "mtf_pro_unique_key": "pro-7-1024",
+                        "mtf_pro_unique_key": "pro-8-1024",
                     }],
                 },
             },
@@ -198,12 +209,12 @@ class CallOpenApiTests(unittest.TestCase):
             )
 
         self.assertEqual(200, status)
-        self.assertEqual("pro-7-1024", body["data"]["unique_key"])
+        self.assertEqual("pro-8-1024", body["data"]["unique_key"])
         self.assertEqual(2, len(captured))
         self.assertEqual("/api/open/v2/mtf/best/by-config", captured[0][1])
         self.assertEqual("/api/open/v2/mtf/future", captured[1][1])
         self.assertEqual("2026-07-28", captured[1][2]["predict_date"])
-        self.assertEqual("pro-7-1024", captured[1][2]["unique_key"])
+        self.assertEqual("pro-8-1024", captured[1][2]["unique_key"])
 
     def test_public_key_request_does_not_add_bearer_header(self):
         captured = {}

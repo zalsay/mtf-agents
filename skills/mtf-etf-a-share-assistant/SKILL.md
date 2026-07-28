@@ -49,7 +49,7 @@ python3 scripts/build_daily_archive.py --date YYYY-MM-DD
 
 # 可选预测配置；context 缺省时按 2048 -> 1024 -> 512 选择 pro best key
 python3 scripts/build_daily_archive.py --date YYYY-MM-DD \
-  --horizon-len 14 --context-len 1024
+  --horizon-len 8 --context-len 1024
 
 skills/mtf-etf-a-share-assistant/scripts/apply_daily_trade_plan.py YYYY-MM-DD \
   --write
@@ -84,9 +84,9 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py watchlist
 skills/mtf-etf-a-share-assistant/scripts/get_open_api_key.sh \
   --v2 --server-name mtf-agents --user-id external-user-id
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-best \
-  --symbol 515880 --stock-type 2 --horizon-len 7 --context-len 2048
+  --symbol 515880 --stock-type 2 --horizon-len 8 --context-len 2048
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-future \
-  --symbol 515880 --stock-type 2 --horizon-len 7 \
+  --symbol 515880 --stock-type 2 --horizon-len 8 \
   --predict-date YYYY-MM-DD
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-public-key
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-best-by-config --symbol 515880 --stock-type 2
@@ -97,7 +97,7 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once \
   --stock-code 515880 --stock-type 2 --prediction-type mtf-pro \
   --horizon-len 7 --context-len 2048 --predict-date YYYY-MM-DD --prefer-cache
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-predict-once \
-  --stock-code 515880 --stock-type 2 --horizon-len 7 --context-len 2048 \
+  --stock-code 515880 --stock-type 2 --horizon-len 8 --context-len 2048 \
   --predict-date YYYY-MM-DD --prefer-cache
 # v2 补算后轮询上面的 mtf-v2-future，不使用 v1 mtf-job 查询
 ```
@@ -118,7 +118,7 @@ v2 key 申请使用 `GET /api/open/v2/auth/public-key` 和 RSA-OAEP-SHA256；申
 
 - ETF/基金统一按 `stock_type=2`。
 - 交易筛选只使用 `prediction_type=mtf-pro`，不使用 lite 兜底。
-- v2 只允许 `context_len=512/1024/2048`、`horizon_len=7/14/28`，先调用 `mtf-best-by-config` 聚合并只选 `mtf_pro_unique_key`；不使用 watchlist 返回的旧 `unique_key`。
+- v2 只允许 `context_len=512/1024/2048`、固定 `horizon_len=8`，先调用 `mtf-best-by-config` 聚合并只选 `mtf_pro_unique_key`；不使用 watchlist 返回的旧 `unique_key`。
 - 候选缺少指定日期的 future 时，使用 `mtf-v2-future` 只查缓存；cache miss 不会自动推理。
 - 需要补算时必须由调用方显式执行 `mtf-v2-predict-once --prediction-type mtf-pro --predict-date YYYY-MM-DD --prefer-cache`，然后轮询相同日期的 `mtf-v2-future` 直到缓存出现；v2 没有可供客户端调用的 job 查询路由，不得改用 v1 `mtf-job`。
 - v2 客户端不接收、不判断会员等级；权限由服务端 API key 统一处理。
@@ -130,7 +130,7 @@ v2 key 申请使用 `GET /api/open/v2/auth/public-key` 和 RSA-OAEP-SHA256；申
 
 ```bash
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-future \
-  --symbol 000001 --stock-type 3 --horizon-len 7 --context-len 2048 \
+  --symbol 000001 --stock-type 3 --horizon-len 8 --context-len 2048 \
   --predict-date YYYY-MM-DD
 ```
 
