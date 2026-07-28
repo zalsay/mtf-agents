@@ -15,7 +15,7 @@ normalize_mtf_future_archive.py 能吃掉的归档 JSON。
   如需补算，必须显式传入 --allow-predict。
 
 用法:
-    python3 scripts/build_daily_archive.py [--date YYYY-MM-DD] [--horizon-len 8]
+    python3 scripts/build_daily_archive.py [--date YYYY-MM-DD] [--horizon-len 8|16|32|64]
         [--context-len 512|1024|2048] [--allow-predict] [--dry-run]
 默认日期 = 今天。
 """
@@ -38,7 +38,7 @@ ENV = SCRIPTS / ".env.open-api"
 INDEX_SYMBOL = "000001"
 CRASH_THRESHOLD = -3.0
 SUPPORTED_CONTEXT_LENS = (512, 1024, 2048)
-SUPPORTED_HORIZON_LENS = (8,)
+SUPPORTED_HORIZON_LENS = (8, 16, 32, 64)
 # ETF 代码特征: 沪市 5xxxxx / 深市 1xxxxx
 ETF_RE = re.compile(r"^(5|1)\d{5}$")
 # 规整 symbol -> 名称 (来自 watchlist 的 company_name)

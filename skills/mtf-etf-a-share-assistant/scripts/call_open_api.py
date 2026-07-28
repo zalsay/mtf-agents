@@ -14,7 +14,7 @@ DEFAULT_BASE_URL = "https://go-api.meetlife.com.cn/mtf-service"
 DEFAULT_ENV_FILE = ".env.open-api"
 V2_CONTEXT_LENS = (512, 1024, 2048)
 V1_HORIZON_LENS = (7, 14, 28)
-V2_HORIZON_LENS = (8,)
+V2_HORIZON_LENS = (8, 16, 32, 64)
 
 
 def load_env_file(path):

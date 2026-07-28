@@ -118,7 +118,7 @@ v2 key 申请使用 `GET /api/open/v2/auth/public-key` 和 RSA-OAEP-SHA256；申
 
 - ETF/基金统一按 `stock_type=2`。
 - 交易筛选只使用 `prediction_type=mtf-pro`，不使用 lite 兜底。
-- v2 只允许 `context_len=512/1024/2048`、固定 `horizon_len=8`，先调用 `mtf-best-by-config` 聚合并只选 `mtf_pro_unique_key`；不使用 watchlist 返回的旧 `unique_key`。
+- v2 只允许 `context_len=512/1024/2048`、`horizon_len=8/16/32/64`，默认使用 `8`；先调用 `mtf-best-by-config` 聚合并只选 `mtf_pro_unique_key`，不使用 watchlist 返回的旧 `unique_key`。
 - 候选缺少指定日期的 future 时，使用 `mtf-v2-future` 只查缓存；cache miss 不会自动推理。
 - 需要补算时必须由调用方显式执行 `mtf-v2-predict-once --prediction-type mtf-pro --predict-date YYYY-MM-DD --prefer-cache`，然后轮询相同日期的 `mtf-v2-future` 直到缓存出现；v2 没有可供客户端调用的 job 查询路由，不得改用 v1 `mtf-job`。
 - v2 客户端不接收、不判断会员等级；权限由服务端 API key 统一处理。

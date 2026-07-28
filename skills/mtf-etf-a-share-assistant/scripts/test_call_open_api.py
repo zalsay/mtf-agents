@@ -63,7 +63,7 @@ class CallOpenApiTests(unittest.TestCase):
         self.assertEqual("mtf-pro", args.prediction_type)
         self.assertEqual(7, args.horizon_len)
 
-    def test_v2_commands_reject_non_eight_horizon(self):
+    def test_v2_commands_reject_unsupported_horizon(self):
         parser = call_open_api.build_parser()
 
         with self.assertRaises(SystemExit):
@@ -72,6 +72,17 @@ class CallOpenApiTests(unittest.TestCase):
                 "--stock-code", "510300",
                 "--horizon-len", "7",
             ])
+
+    def test_v2_commands_accept_extended_horizon(self):
+        parser = call_open_api.build_parser()
+        args = parser.parse_args([
+            "mtf-v2-predict-once",
+            "--stock-code", "510300",
+            "--horizon-len", "16",
+        ])
+
+        _, _, _, payload = call_open_api.command_to_request(args)
+        self.assertEqual(16, payload["horizon_len"])
 
     def test_v2_best_command_uses_aggregate_endpoint_and_supported_defaults(self):
         parser = call_open_api.build_parser()

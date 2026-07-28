@@ -94,7 +94,7 @@ v2 公钥每次申请时动态获取，不写入仓库；当前服务使用 RSA-
 4. **查询已有 MTF 结果**
    - `GET /api/open/v1/watchlist`：确认当前 API key 用户关注清单；MTF 读取类接口只允许访问关注清单内标的。
    - `GET /api/open/v1/mtf/best?stock_type=2&include_validation=true`：查询可访问 best 结果；如服务端返回验证信息则一并带出。
-   - v2 客户端先通过 `GET /api/open/v2/mtf/best/by-config` 聚合配置，只选择 `mtf_pro_unique_key`，`context_len` 仅允许 `512/1024/2048`，`horizon_len` 固定为 `8`。
+   - v2 客户端先通过 `GET /api/open/v2/mtf/best/by-config` 聚合配置，只选择 `mtf_pro_unique_key`，`context_len` 仅允许 `512/1024/2048`，`horizon_len` 允许 `8/16/32/64`，默认使用 `8`。
    - `mtf-v2-future` 使用选中的 pro key 查询指定日期已有 future chunk；不传日期时才使用服务端上海时区当天日期。
    - 若 `mtf-future` 返回 `predicted_change_percent` 数组和 `change_base_value`，应把每个预测涨跌幅点换算为对应价格序列：`price_i = change_base_value * (1 + predicted_change_percent_i / 100)`。
    - 在价格序列可换算时，区间最低对应价格作为参考买入价，区间最高对应价格作为参考卖出价；若只有单个预测值或缺少 `change_base_value`，则只能输出周期末参考价，不能声称已得到区间最低/最高价。
