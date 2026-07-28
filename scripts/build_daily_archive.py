@@ -2,8 +2,8 @@
 """构建当日 MTF future 归档 (reports/mtf-etf/YYYY-MM-DD/YYYY-MM-DD-mtf-future.json)。
 
 该脚本供每日自动化工作流第 1 步调用: 自动从 Open API 拉取
-- etf-hot 热门 ETF 雷达, 持久化为本地快照 YYYY-MM-DD-etf-hot.json (候选"发现源")
-- watchlist 候选与每只标的指定日期的 mtf-future 缓存查询
+- etf-hot 热门 ETF 雷达, 持久化为本地快照 YYYY-MM-DD-etf-hot.json, 并作为预测目标列表
+- 每个热门 ETF 的指定日期 mtf-future 缓存查询
 用 easy-tdx(QFQ) 回填当日实际收盘, 组装成
 normalize_mtf_future_archive.py 能吃掉的归档 JSON。
 
@@ -41,7 +41,7 @@ SUPPORTED_CONTEXT_LENS = (512, 1024, 2048)
 SUPPORTED_HORIZON_LENS = (8, 16, 32, 64)
 # ETF 代码特征: 沪市 5xxxxx / 深市 1xxxxx
 ETF_RE = re.compile(r"^(5|1)\d{5}$")
-# 规整 symbol -> 名称 (来自 watchlist 的 company_name)
+# 规整 symbol -> 名称 (来自 etf-hot 的 name)
 NAME_MAP = {}
 
 
@@ -112,47 +112,39 @@ def wait_for_prediction_cache(v2_args):
     raise RuntimeError(f"v2 预测缓存轮询超时: {last_error}")
 
 
-def get_candidates():
-    """返回 {规整symbol: stock_type}，仅含 ETF/基金类标的。
+def get_candidates(hot_response):
+    """返回 {规整symbol: stock_type}，目标直接来自 etf-hot.items。"""
+    payload = (hot_response.get("data") or {}) if isinstance(hot_response, dict) else {}
+    items = payload.get("items") or []
+    if not isinstance(items, list):
+        raise OpenAPIError("etf-hot 返回的 items 不是列表", hot_response)
 
-    watchlist 的 symbol 带交易所前缀 (sh/sz/bj)，需先去掉；并用 stock_type==2
-    或 ETF 代码特征 (5xxxxx 沪市 / 1xxxxx 深市) 过滤。上证指数不在 watchlist 内，
-    由 build_index_risk 单独处理。watchlist 中的旧 unique_key 不是 v2 的配置来源。
-    """
-    d = call_api("watchlist")
-    wl = (d.get("data") or {}).get("watchlist", [])
     out = {}
-    for w in wl:
-        st = w.get("stock") or {}
-        raw_sym = str(st.get("symbol", "") or "")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_sym = str(item.get("code", "") or item.get("symbol", "") or "")
         if not raw_sym:
             continue
         sym = re.sub(r"^(sh|sz|bj)", "", raw_sym, flags=re.I) or raw_sym
-        stype = w.get("stock_type")
-        is_etf = (str(stype) == "2") or bool(ETF_RE.match(sym))
-        if is_etf:
-            out[sym] = 2
-            NAME_MAP[sym] = st.get("company_name", "") or ""
-            print(f"[cand] {raw_sym} -> {sym} ({NAME_MAP[sym]})")
+        if not ETF_RE.match(sym):
+            continue
+        out[sym] = 2
+        NAME_MAP[sym] = str(item.get("name", "") or "")
+        print(f"[cand] {raw_sym} -> {sym} ({NAME_MAP[sym]})")
     return out
 
 
-def get_watchlist_name(sym):
+def get_candidate_name(sym):
     return NAME_MAP.get(sym, "")
 
 
 def fetch_and_save_etf_hot(report_date, out_dir, dry_run=False):
-    """拉取 etf-hot 热门 ETF 雷达并持久化为本地 JSON 快照 (best-effort, 非致命)。
-
-    这是候选"发现源"的本地落盘：etf-hot 只给热门雷达元数据（不给 MTF 预测），
-    MTF 预测按权限只能在 watchlist 内拉取。上游偶发不可用时不影响主归档，仅记录错误。
-    返回写出路径；失败时返回 None。
-    """
+    """拉取 etf-hot 并持久化快照；返回原始 Open API 响应作为候选源。"""
     try:
         raw = call_api("etf-hot")
     except Exception as e:
-        print(f"[etf-hot][warn] 拉取失败, 跳过快照: {e}")
-        return None
+        raise OpenAPIError(f"etf-hot 拉取失败: {e}") from e
     envelope_err = (raw.get("status") == "error") or bool(raw.get("error"))
     payload = {
         "report_date": report_date,
@@ -166,11 +158,11 @@ def fetch_and_save_etf_hot(report_date, out_dir, dry_run=False):
     out_path = out_dir / f"{report_date}-etf-hot.json"
     if dry_run:
         print(f"[dry-run] 将写入 {out_path} (etf-hot 快照, ok={not envelope_err})")
-        return out_path
+        return raw
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     hot = (raw.get("data") or {})
     print(f"[etf-hot] 已保存 {out_path} (ok={not envelope_err}, data keys={list(hot.keys())})")
-    return out_path
+    return raw
 
 
 def build_index_risk(report_date, horizon_len, context_len, allow_predict=False):
@@ -299,14 +291,14 @@ def build(
     if not dry_run:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) 候选"发现源"快照: etf-hot 热门 ETF 雷达落盘 (best-effort, 失败不影响主归档)
+    # 1) etf-hot 是候选发现源，同时落盘雷达快照
     try:
-        fetch_and_save_etf_hot(report_date, out_dir, dry_run=dry_run)
+        hot_response = fetch_and_save_etf_hot(report_date, out_dir, dry_run=dry_run)
     except Exception as e:
-        print(f"[warn] etf-hot 快照写入失败 (不影响 mtf-future 主归档): {e}")
+        raise RuntimeError(f"etf-hot 候选发现失败，停止构建: {e}") from e
 
-    # 2) 操作边界: watchlist 候选 -> mtf-future 预测归档
-    cands = get_candidates()
+    # 2) 操作边界: etf-hot 候选 -> v2 mtf-future 预测归档
+    cands = get_candidates(hot_response)
     print(f"[build] {report_date}: {len(cands)} 个 ETF 候选")
 
     items = []
@@ -320,7 +312,7 @@ def build(
                 context_len=context_len,
                 allow_predict=allow_predict,
             )
-            name = (get_watchlist_name(sym) or resp.get("short_name")
+            name = (get_candidate_name(sym) or resp.get("short_name")
                     or resp.get("name") or sym)
             actual, actual_date = fetch_close_best_effort(sym, report_date)
         except Exception as e:

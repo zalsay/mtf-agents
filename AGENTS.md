@@ -92,7 +92,8 @@ v2 公钥每次申请时动态获取，不写入仓库；当前服务使用 RSA-
    - `GET /api/open/v1/etf/lookup?symbol=...`：补齐 ETF 名称。
 
 4. **查询已有 MTF 结果**
-   - `GET /api/open/v1/watchlist`：确认当前 API key 用户关注清单；MTF 读取类接口只允许访问关注清单内标的。
+   - 每日热门 ETF 流程直接使用 `GET /api/open/v1/etf/hot` 返回的 `data.items` 作为 MTF 查询目标，不再调用 `watchlist` 缩小候选范围。
+   - `GET /api/open/v1/watchlist`：仅在用户明确要求自选清单或 v1 用户级操作时调用；v2 best/future 不依赖本地用户表。
    - `GET /api/open/v1/mtf/best?stock_type=2&include_validation=true`：查询可访问 best 结果；如服务端返回验证信息则一并带出。
    - v2 客户端先通过 `GET /api/open/v2/mtf/best/by-config` 聚合配置，只选择 `mtf_pro_unique_key`，`context_len` 仅允许 `512/1024/2048`，`horizon_len` 允许 `8/16/32/64`，默认使用 `8`。
    - `mtf-v2-future` 使用选中的 pro key 查询指定日期已有 future chunk；不传日期时才使用服务端上海时区当天日期。
