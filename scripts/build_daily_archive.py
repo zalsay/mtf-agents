@@ -11,12 +11,12 @@ normalize_mtf_future_archive.py 能吃掉的归档 JSON。
 - close_observation.source 必须为 'easy_tdx_qfq_daily_kline' (前复权口径),
   与 easy-tdx 拉取的路径点一致, 避免 split_adjustments.json 的份额拆分因子被重复计算。
 - ETF 预测只用 mtf-pro，并通过 v2 客户端先选择 512/1024/2048 的 best key。
-  v2 future 查询只读取指定日期的已有缓存；缓存未命中默认跳过。
-  如需补算，必须显式传入 --allow-predict。
+  v2 future 先读取指定日期的已有缓存；缓存未命中自动触发同配置补算并轮询 future。
+  如需只读缓存，显式传入 --cache-only。
 
 用法:
     python3 scripts/build_daily_archive.py [--date YYYY-MM-DD] [--horizon-len 8|16|32|64]
-        [--context-len 512|1024|2048] [--allow-predict] [--dry-run]
+        [--context-len 512|1024|2048] [--cache-only] [--dry-run]
 默认日期 = 今天。
 """
 import argparse
@@ -43,6 +43,8 @@ SUPPORTED_HORIZON_LENS = (8, 16, 32, 64)
 ETF_RE = re.compile(r"^(5|1)\d{5}$")
 # 规整 symbol -> 名称 (来自 etf-hot 的 name)
 NAME_MAP = {}
+PREDICTION_POLL_ATTEMPTS = 24
+PREDICTION_POLL_INTERVAL_SECONDS = 5
 
 
 class OpenAPIError(RuntimeError):
@@ -89,6 +91,11 @@ def is_prediction_cache_miss(error):
     return "prediction_cache_not_found" in json.dumps(error.body, ensure_ascii=False)
 
 
+def future_contains_date(data, predict_date):
+    dates = data.get("future_dates") if isinstance(data, dict) else None
+    return isinstance(dates, list) and predict_date in {str(value) for value in dates}
+
+
 def wait_for_prediction_cache(v2_args):
     """Poll the v2 dated future cache after an async prediction trigger.
 
@@ -96,26 +103,29 @@ def wait_for_prediction_cache(v2_args):
     public completion signal and keeps the v2 short-key flow self-contained.
     """
     last_error = "prediction cache is still unavailable"
-    for attempt in range(40):  # 最多等约 10 分钟
+    target_date = v2_args[v2_args.index("--predict-date") + 1]
+    for attempt in range(PREDICTION_POLL_ATTEMPTS):
         try:
             response = call_api("mtf-v2-future", *v2_args)
             data = response_data(response)
-            if data.get("predicted_change_percent") or data.get("future_dates"):
+            if future_contains_date(data, target_date):
                 return data
-            last_error = "prediction response did not contain future data"
+            last_error = f"prediction response did not contain target future date {target_date}"
         except OpenAPIError as exc:
             if not is_prediction_cache_miss(exc):
                 raise
             last_error = str(exc)
-        if attempt < 39:
-            time.sleep(15)
+        if attempt < PREDICTION_POLL_ATTEMPTS - 1:
+            time.sleep(PREDICTION_POLL_INTERVAL_SECONDS)
     raise RuntimeError(f"v2 预测缓存轮询超时: {last_error}")
 
 
 def get_candidates(hot_response):
     """返回 {规整symbol: stock_type}，目标直接来自 etf-hot.items。"""
     payload = (hot_response.get("data") or {}) if isinstance(hot_response, dict) else {}
-    items = payload.get("items") or []
+    items = payload.get("items")
+    if items is None:
+        items = []
     if not isinstance(items, list):
         raise OpenAPIError("etf-hot 返回的 items 不是列表", hot_response)
 
@@ -211,6 +221,11 @@ def fetch_mtf_future(
     v2_args.extend(["--predict-date", predict_date])
     try:
         d = call_api("mtf-v2-future", *v2_args)
+        if not future_contains_date(response_data(d), predict_date):
+            raise OpenAPIError(
+                f"future response does not contain target date {predict_date}",
+                {"error": {"code": "prediction_cache_not_found"}},
+            )
     except OpenAPIError as exc:
         if not allow_predict or not is_prediction_cache_miss(exc):
             raise
@@ -219,7 +234,8 @@ def fetch_mtf_future(
         selected_horizon = int(selected["horizon_len"])
         selected_context = int(selected["context_len"])
         print(
-            f"[cache-miss] {key} {predict_date}; 显式触发 mtf-v2-predict-once "
+            f"[cache-miss] future={key} contains={predict_date}; "
+            f"触发 mtf-v2-predict-once predict_date={predict_date} "
             f"(horizon={selected_horizon}, context={selected_context}, type=mtf-pro)"
         )
         trigger = call_api(
@@ -236,8 +252,8 @@ def fetch_mtf_future(
         wait_for_prediction_cache(v2_args)
         d = call_api("mtf-v2-future", *v2_args)
     data = response_data(d)
-    if not data.get("predicted_change_percent") and not data.get("future_dates"):
-        raise RuntimeError(f"{stock_code} 未返回有效预测")
+    if not future_contains_date(data, predict_date):
+        raise RuntimeError(f"{stock_code} 未返回包含 {predict_date} 的有效 future")
     return data
 
 
@@ -284,7 +300,7 @@ def build(
     report_date,
     horizon_len=8,
     context_len=None,
-    allow_predict=False,
+    allow_predict=True,
     dry_run=False,
 ):
     out_dir = ROOT / "reports" / "mtf-etf" / report_date
@@ -372,10 +388,16 @@ def main():
     ap.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"))
     ap.add_argument("--horizon-len", type=int, choices=SUPPORTED_HORIZON_LENS, default=8)
     ap.add_argument("--context-len", type=int, choices=SUPPORTED_CONTEXT_LENS)
-    ap.add_argument(
+    predict_mode = ap.add_mutually_exclusive_group()
+    predict_mode.add_argument(
         "--allow-predict",
         action="store_true",
-        help="缓存缺失时显式触发 mtf-pro 单次预测；默认只查缓存",
+        help=argparse.SUPPRESS,
+    )
+    predict_mode.add_argument(
+        "--cache-only",
+        action="store_true",
+        help="只查询已有 future 缓存，不触发补算",
     )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -383,7 +405,7 @@ def main():
         args.date,
         horizon_len=args.horizon_len,
         context_len=args.context_len,
-        allow_predict=args.allow_predict,
+        allow_predict=not args.cache_only,
         dry_run=args.dry_run,
     )
 

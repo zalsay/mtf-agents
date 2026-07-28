@@ -70,9 +70,9 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-future --symbol
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-predict-once --stock-code 510300 --stock-type 2 --horizon-len 8 --context-len 2048 --prefer-cache
 ```
 
-默认由用户在 FinTrack 前端生成 Open API 临时令牌，再交给 OpenClaw、Claude Code、Codex 等智能体兑换 key。用户名/密码换 key 仅作为用户明确授权的 legacy fallback。
-v2 key 不使用本地用户表；申请脚本只临时使用 RSA 密文，后续只保存服务端返回的短 key 到 `MTF_OPEN_API_V2_KEY`，不覆盖 v1 的 `FINTRACK_OPEN_API_KEY`。
-v2 公钥每次申请时动态获取，不写入仓库；当前服务使用 RSA-OAEP-SHA256，密文为 256 字节，服务端返回的短 key 长度为 50 个字符。
+默认由用户在 FinTrack 前端生成 Open API 临时令牌，再交给 OpenClaw、Claude Code、Codex 等智能体兑换 key。用户名/密码换 key 仅作为用户明确授权的备用方式。
+预测 key 不使用本地用户表；申请脚本只临时使用 RSA 密文，后续只保存服务端返回的短 key 到 `MTF_OPEN_API_V2_KEY`。
+预测公钥每次申请时动态获取，不写入仓库；当前服务使用 RSA-OAEP-SHA256，密文为 256 字节，服务端返回的短 key 长度为 50 个字符。
 
 ## 标准 ETF 研究工作流
 
@@ -103,8 +103,8 @@ v2 公钥每次申请时动态获取，不写入仓库；当前服务使用 RSA-
 5. **触发预测**
    - ETF 交易筛选只使用 `prediction_type=mtf-pro`，不使用 `mtf-lite` 兜底。
    - 若 v2 没有 pro best key，不能切换到 lite；需要单独、明确授权后调用 v1 训练接口。
-   - 指定日期的 future 缺失时，`mtf-v2-future` 只返回 cache miss；需要补算时才单独调用 `POST /api/open/v2/mtf/predict-once`，传入 `predict_date` 并设置 `prefer_cache=true`，再轮询相同日期的 `mtf-v2-future`。v2 没有客户端可用的 job 查询路由，不得用 v1 `mtf-job` 查询 v2 任务。
-   - 触发计算前必须说明是否已有缓存、是否需要新计算、可能耗时和权限约束；异步任务的完成信号以相同日期的 v2 future 缓存出现为准。
+   - `mtf-v2-future` 接口本身只返回已有缓存；每日 workflow 遇到指定日期 future 缺失时，使用同一个 `predict_date` 调用 `POST /api/open/v2/mtf/predict-once`，设置 `prefer_cache=true`，再用同一个日期轮询 `mtf-v2-future`，直到该日期出现在 `future_dates` window 内。诊断场景可使用 workflow 的 `--cache-only`；补算完成以目标日期的 future 命中为准，不查询任务状态接口。
+   - `predict_date` 始终表示目标 future 日期；gateway/Python 负责使用目标日前的历史数据生成该 chunk。
 
 6. **回测与策略**
    - 使用 `POST /api/open/v1/mtf/backtest` 验证策略规则。
@@ -112,6 +112,7 @@ v2 公钥每次申请时动态获取，不写入仓库；当前服务使用 RSA-
    - 自选股相关操作用 `GET/POST /api/open/v1/watchlist` 和 `POST /api/open/v1/watchlist/bind-strategy`。
 
 7. **输出结论**
+   - 默认只输出按最新参数与流程生成的结果，不向用户展开版本、旧接口、内部补算、fallback、轮询或 key 细节；只有用户明确要求技术诊断时才说明。
    - 给出候选排序表：ETF、主题、雷达优先级、行情、实际采用的预测类型、`predicted_change_percent` 周期末值和路径、参考买入价、参考卖出价、验证质量、策略匹配、风险、下一步。
    - 明确说明数据时间、预测参数、验证区间、偏差、模型局限和下一步 API 动作。
 

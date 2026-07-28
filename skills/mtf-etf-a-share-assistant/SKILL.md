@@ -13,6 +13,7 @@ description: "当需要作为 MTF A 股 ETF 助手处理每日 ETF 工作流、�
 - 必须区分实际收盘价、模型预测、策略规则和风险控制。
 - 每日工作流优先使用本 skill 的脚本生成归档、研究结论和交易计划；不要手写复杂表格或临时复刻计算公式。
 - 面向用户的 Markdown 必须自然、易读，只按收盘价口径表达，不暴露开发类术语。
+- 用户默认只接收按最新参数与流程生成的候选、预测、风控和交易结论；不展开旧流程、内部补算过程或凭证细节，除非用户明确要求技术诊断。
 
 ## 运行依赖
 
@@ -30,7 +31,7 @@ cd mtf-agents
 
 每日 ETF 工作流的脚本优先顺序：
 
-1. 用 `scripts/build_daily_archive.py --date YYYY-MM-DD` 一键构建当日 `YYYY-MM-DD-mtf-future.json`（内部先通过 v2 `etf-hot` 拉取并落盘 `YYYY-MM-DD-etf-hot.json`，直接以 `data.items` 中的热门 ETF 作为目标，再通过 v2 规则选择 mtf-pro best key、按归档日期读取已有 future 缓存；默认 cache miss 只跳过，明确需要补算时才增加 `--allow-predict`；最后用 easy-tdx(QFQ) 回填当日收盘；`close_observation.source` 固定为 `easy_tdx_qfq_daily_kline` 避免拆分因子双计；单只预测/行情失败自动跳过继续）。
+1. 用 `scripts/build_daily_archive.py --date YYYY-MM-DD` 一键构建当日 `YYYY-MM-DD-mtf-future.json`（内部先通过 v2 `etf-hot` 拉取并落盘 `YYYY-MM-DD-etf-hot.json`，直接以 `data.items` 中的热门 ETF 作为目标，再通过 v2 规则选择 mtf-pro best key；future 缓存必须包含指定日期，缺失时以同一个指定日期触发补算，再严格轮询该日期的 future window；最后用 easy-tdx(QFQ) 回填当日收盘；`close_observation.source` 固定为 `easy_tdx_qfq_daily_kline` 避免拆分因子双计；单只预测/行情失败自动跳过继续）。
 2. 用 `apply_daily_trade_plan.py` 按上一交易日计划生成当日模拟账户文件。
 3. 用 `normalize_mtf_future_archive.py` 归一化 `YYYY-MM-DD-mtf-future.json`。
 4. 用 `render_daily_etf_outputs.py` 从归一化归档和模拟账户文件生成：
@@ -47,9 +48,12 @@ cd mtf-agents
 # 1) 一键构建当日预测归档 (v2 etf-hot -> v2 mtf-future + easy-tdx 回填)
 python3 scripts/build_daily_archive.py --date YYYY-MM-DD
 
-# 可选预测配置；context 缺省时按 2048 -> 1024 -> 512 选择 pro best key
+# 可选预测配置；context 缺省时按 2048 -> 1024 -> 512 选择 pro best key，future 缺失自动补算
 python3 scripts/build_daily_archive.py --date YYYY-MM-DD \
   --horizon-len 8 --context-len 1024
+
+# 仅诊断已有缓存，不触发补算
+python3 scripts/build_daily_archive.py --date YYYY-MM-DD --cache-only
 
 skills/mtf-etf-a-share-assistant/scripts/apply_daily_trade_plan.py YYYY-MM-DD \
   --write
@@ -88,17 +92,10 @@ skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-future \
   --symbol 515880 --stock-type 2 --horizon-len 8 \
   --predict-date YYYY-MM-DD
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-public-key
-skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-best-by-config --symbol 515880 --stock-type 2
-skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-future \
-  --unique-key 515880_best_hlen_7_clen_2048_v_2.5_mtf-pro \
-  --predict-date YYYY-MM-DD
-skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-predict-once \
-  --stock-code 515880 --stock-type 2 --prediction-type mtf-pro \
-  --horizon-len 7 --context-len 2048 --predict-date YYYY-MM-DD --prefer-cache
 skills/mtf-etf-a-share-assistant/scripts/call_open_api.py mtf-v2-predict-once \
   --stock-code 515880 --stock-type 2 --horizon-len 8 --context-len 2048 \
   --predict-date YYYY-MM-DD --prefer-cache
-# v2 补算后轮询上面的 mtf-v2-future，不使用 v1 mtf-job 查询
+# 补算后使用同一个目标日期轮询上面的 mtf-v2-future，以日期命中作为完成信号。
 ```
 
 API key 默认从 `.env.open-api` 读取。若文件不在仓库根目录，调用时显式传：
@@ -107,8 +104,8 @@ API key 默认从 `.env.open-api` 读取。若文件不在仓库根目录，调�
 --env-file skills/mtf-etf-a-share-assistant/scripts/.env.open-api
 ```
 
-不得提交 `.env.open-api`、API key、密码或其它凭证。v2 热门 ETF、best、future 和 predict 使用 `MTF_OPEN_API_V2_KEY`；v1 数据接口继续使用 `FINTRACK_OPEN_API_KEY`。
-v2 key 申请使用 `GET /api/open/v2/auth/public-key` 和 RSA-OAEP-SHA256；申请密文只在请求期间存在，后续使用服务端返回的短 key。
+不得提交 `.env.open-api`、API key、密码或其它凭证。热门 ETF、best、future 和 predict 统一使用 `MTF_OPEN_API_V2_KEY`；行情等补充数据由脚本按环境配置读取，不在用户结果中展示鉴权细节。
+预测 key 申请使用 `GET /api/open/v2/auth/public-key` 和 RSA-OAEP-SHA256；申请密文只在请求期间存在，后续使用服务端返回的短 key。
 公钥每次申请时动态获取，不在 skill 中硬编码；当前服务返回 `ciphertext_bytes=256`，短 key 长度为 50 个字符。
 
 ## 每日工作流硬规则
@@ -119,10 +116,11 @@ v2 key 申请使用 `GET /api/open/v2/auth/public-key` 和 RSA-OAEP-SHA256；申
 - 交易筛选只使用 `prediction_type=mtf-pro`，不使用 lite 兜底。
 - 每日工作流的候选直接来自 v2 `etf-hot` 返回的 `data.items`，逐个使用其 `code` 查询 v2 best 与指定日期 future；不再使用 watchlist 作为候选源。
 - v2 只允许 `context_len=512/1024/2048`、`horizon_len=8/16/32/64`，默认使用 `8`；先调用 `mtf-best-by-config` 聚合并只选 `mtf_pro_unique_key`。
-- 候选缺少指定日期的 future 时，使用 `mtf-v2-future` 只查缓存；cache miss 不会自动推理。
-- 需要补算时必须由调用方显式执行 `mtf-v2-predict-once --prediction-type mtf-pro --predict-date YYYY-MM-DD --prefer-cache`，然后轮询相同日期的 `mtf-v2-future` 直到缓存出现；v2 没有可供客户端调用的 job 查询路由，不得改用 v1 `mtf-job`。
+- v2 `mtf-v2-future` 接口本身只查已有缓存，永不在 cached 查询中直接触发推理；gateway 只有在 `predict_date` 精确出现在返回的 `future_dates` chunk window 内时才视为命中，否则必须按 cache miss 处理并返回 404。
+- 每日 workflow 遇到必须包含 `YYYY-MM-DD` 的 future cache miss 时，自动执行 `mtf-v2-predict-once --prediction-type mtf-pro --predict-date YYYY-MM-DD --prefer-cache`，然后使用相同的 `mtf-v2-future --predict-date YYYY-MM-DD` 严格轮询，直到该日期出现在 `future_dates` window 内；`--cache-only` 可关闭自动补算。补算完成以目标日期的 future 命中为准，不查询任务状态接口。
+- `predict_date` 始终是目标 future chunk 的日期，不得改写成前一交易日，也不得由客户端把它转换成 `end_date`；推理服务使用目标日前的实际历史生成从该目标日开始的 future window。
 - v2 客户端不接收、不判断会员等级；权限由服务端 API key 统一处理。
-- `watchlist` 仅用于用户明确要求的自选清单和 v1 用户级操作；每日热门 ETF 工作流不因 watchlist 内容或限制而缩小候选范围。
+- `watchlist` 仅用于用户明确要求的自选清单或用户级操作；每日热门 ETF 工作流不因 watchlist 内容或限制而缩小候选范围。
 
 ### 上证指数风控
 
@@ -193,6 +191,7 @@ deviation_points = actual_change_percent - expected_change_percent
 
 用户版 Markdown 只允许自然语言和收盘价口径：
 
+- 默认只呈现按最新参数与流程生成的预测结果，不解释版本、旧接口、内部补算、fallback、轮询或 key；只有用户明确要求技术诊断时才说明。
 - 必须包含核心结论、证据表、市场风控、交易判断、风险提示。
 - 不展示“日期对齐”列，但内部必须完成同日对照。
 - 不把预测路径下沿/上沿写成买入价/卖出价。
